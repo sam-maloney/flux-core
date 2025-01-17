@@ -124,12 +124,14 @@ int jj_get_counts_json (json_t *jobspec, struct jj_counts *jj)
         errno = EINVAL;
         return -1;
     }
+    /*
     if (version != 1) {
         snprintf (jj->error, sizeof (jj->error) - 1,
                  "Invalid version: expected 1, got %d", version);
         errno = EINVAL;
         return -1;
     }
+    */
     /* N.B. attributes.system is generally optional, but
      * attributes.system.duration is required in jobspec version 1 */
     if (json_unpack_ex (jobspec, &error, 0, "{s:{s:{s:F}}}",
