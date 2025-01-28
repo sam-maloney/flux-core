@@ -1945,7 +1945,7 @@ int main (int argc, char *argv[])
     /* Subscribe to shell-<id>.* events. (no-op on loopback connector)
      */
     shell_events_subscribe (&shell);
-
+    
     /* Populate 'struct shell_info' for general use by shell components.
      * Fetches missing info from shell handle if set.
      */
