@@ -14,6 +14,7 @@
 #if HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include <limits.h>
 #include <flux/core.h>
 #include <flux/shell.h>
 #include <jansson.h>
@@ -45,11 +46,136 @@ void jobspec_destroy (struct jobspec *job)
     }
 }
 
+struct resource_range {
+    int min;
+    int max;
+    char operator;
+    int operand;
+};
+
+struct resource_range *create_resource_range(json_t *json_range,
+                                             json_error_t *error)
+{    
+    json_error_t loc_error;
+    struct resource_range *range = NULL;
+
+    if (!(range = calloc (1, sizeof (*range)))) {
+        set_error (error, "create_resource_range: Out of memory");
+    }
+
+    // set defaults for optional fields
+    range->max = INT_MAX;
+    range->operator = '+';
+    range->operand = 1;
+
+    if (json_is_integer (json_range)) {
+        range->min = json_integer_value (json_range);
+        range->max = range->min;
+        return range;
+    }
+
+    const char *operator = NULL;
+    if (json_unpack_ex(json_range, &loc_error, 0,
+                       "{s:i, s?i, s?s, s?i}",
+                       "min", &range->min,
+                       "max", &range->max,
+                       "operator", &operator,
+                       "operand", &range->operand) < 0) {
+        set_error (error, "create_resource_range: %s", loc_error.text);
+        goto error;
+    }
+
+    if (operator) {
+        range->operator = operator[0];
+    }
+
+    switch (range->operator) {
+        case '+':
+            if (range->operand < 1) {
+                set_error (error, "create_resource_range: '+' operand must be >= 1");
+                goto error;
+            }
+            break;
+        case '*':
+            if (range->operand < 2) {
+                set_error (error, "create_resource_range: '*' operand must be >= 2");
+                goto error;
+            }
+            break;
+        case '^':
+            if (range->operand < 2) {
+                set_error (error, "create_resource_range: '^' operand must be >= 2");
+                goto error;
+            }
+            break;
+        default:
+            set_error (error, "create_resource_range: unknown operator %c", range->operator);
+            goto error;
+    }
+
+    return range;
+
+error:
+    free (range);
+    return NULL; 
+}
+
+static int resolve_slot_range(struct shell_info *info,
+                              json_t *slot_json,
+                              json_t *core_json,
+                              json_error_t *error)
+{
+//    int total_nodes = rcalc_total_nodes (info->rcalc);
+//    int total_cores = rcalc_total_cores (info->rcalc);
+    int slot_count = 0;
+
+    struct resource_range *slot_range = create_resource_range (slot_json, error);
+    struct resource_range *core_range = create_resource_range (core_json, error);
+
+    fprintf(stderr, "slot range is [%d, %d, %c, %d]\n", slot_range->min,
+                                                        slot_range->max,
+                                                        slot_range->operator,
+                                                        slot_range->operand);
+    fprintf(stderr, "core range is [%d, %d, %c, %d]\n", core_range->min,
+                                                        core_range->max,
+                                                        core_range->operator,
+                                                        core_range->operand);
+
+    int i = slot_range->min;
+    while (i <= slot_range->max) {
+
+
+        switch (slot_range->operator) {
+            case '+':
+                i += slot_range->operand;
+                break;
+            case '*':
+                i *= slot_range->operand;
+                break;
+            case '^':
+                int base = i;
+                for (int j = 1; j < slot_range->operand; ++j) {
+                    i *= base;
+                }
+                break;
+            default:
+                set_error (error, "resolve_slot_range: unknown operator %c", slot_range->operator);
+                return -1;
+        }
+    }
+
+    free (slot_range);
+    free (core_range);
+
+    return slot_count;
+}
+
 static int recursive_parse_helper (struct shell_info *info,
                                   json_t *curr_resource,
                                   json_error_t *error,
                                   int level,
-                                  int multiplier)
+                                  int multiplier,
+                                  json_t *slot_range)
 {
     struct jobspec *job = info->jobspec;
     rcalc_t *r = info->rcalc;
@@ -108,12 +234,11 @@ static int recursive_parse_helper (struct shell_info *info,
                 set_error (error, "slot resource encountered after slot resource");
                 return -1;
             }
-            if (!json_is_integer (count)) {
-                set_error (error, "count must be integer for slot resource");
-                return -1;
+            if (json_is_integer (count)) {
+                job->slot_count = multiplier * json_integer_value (count);
+            } else {
+                slot_range = count;
             }
-            
-            job->slot_count = multiplier * json_integer_value (count);
 
             // Check if we already encountered the `node` resource
             if (job->node_count > 0) {
@@ -124,7 +249,7 @@ static int recursive_parse_helper (struct shell_info *info,
                 job->slots_per_node = job->slot_count / job->node_count;
             }
         } else if (streq (type, "core")) {
-            if (job->slot_count < 1) {
+            if (job->slot_count < 1 && !slot_range) {
                 set_error (error, "core resource encountered before slot resource");
                 return -1;
             }
@@ -133,7 +258,14 @@ static int recursive_parse_helper (struct shell_info *info,
                 return -1;
             }
 
-            job->cores_per_slot = rcalc_total_cores (r) / job->slot_count;
+            if (slot_range) {
+                job->slot_count = resolve_slot_range(info, slot_range, count, error);
+                if (job->slot_count < 0) {
+                    return -1;
+                } 
+            } else {
+                job->cores_per_slot = rcalc_total_cores (r) / job->slot_count;
+            }
             // N.B.: despite having found everything we were looking for (i.e.,
             // node, slot, and core resources), we have to keep recursing to
             // make sure their aren't additional erroneous node/slot/core
@@ -145,7 +277,8 @@ static int recursive_parse_helper (struct shell_info *info,
                                         with,
                                         error,
                                         level+1,
-                                        multiplier)
+                                        multiplier,
+                                        slot_range)
                 < 0) {
                 return -1;
             }
@@ -191,7 +324,7 @@ static int recursive_parse_jobspec_resources (struct shell_info *info,
     job->slots_per_node = -1;
     job->node_count = -1;
 
-    int rc = recursive_parse_helper (info, job->resources, error, 0, 1);
+    int rc = recursive_parse_helper (info, job->resources, error, 0, 1, NULL);
 
     if ((rc == 0) && (job->cores_per_slot < 1)) {
         set_error (error, "Missing core resource");
