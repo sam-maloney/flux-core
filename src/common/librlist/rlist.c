@@ -1722,12 +1722,13 @@ json_t *rlist_to_R (const struct rlist *rl)
         || rlist_json_properties (rl, &properties) < 0)
         goto fail;
 
-    if (!(R = json_pack ("{s:i, s:{s:o s:f s:f}}",
+    if (!(R = json_pack ("{s:i, s:{s:o s:i s:f s:f}}",
                          "version", 1,
                          "execution",
-                         "R_lite", R_lite,
-                         "starttime", rl->starttime,
-                         "expiration", rl->expiration)))
+                           "R_lite", R_lite,
+                           "nslots", rl->nslots,
+                           "starttime", rl->starttime,
+                           "expiration", rl->expiration)))
         goto fail;
     if (nodelist
         && json_object_set_new (json_object_get (R, "execution"),

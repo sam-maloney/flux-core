@@ -245,6 +245,9 @@ static int try_alloc (flux_t *h, struct simple_sched *ss)
     if (!fail_alloc) {
         errno = 0;
         alloc = sched_alloc (ss, job, &error);
+        if (alloc != NULL) {
+            alloc->nslots = jj->nslots;
+        }
     }
     if (!alloc || !(R = Rstring_create (ss, alloc, now, jj->duration))) {
         const char *note = "unable to allocate provided jobspec";
