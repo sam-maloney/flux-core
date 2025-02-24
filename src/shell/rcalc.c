@@ -206,10 +206,11 @@ rcalc_t * rcalc_create_json (json_t *o)
         return (NULL);
     r->json = json_incref (o);
     if (json_unpack_ex (o, NULL, 0,
-                        "{s:i s:{s:o}}",
+                        "{s:i s:{s:o s:i}}",
                         "version", &version,
                         "execution",
-                        "R_lite", &r->R_lite) < 0)
+                            "R_lite", &r->R_lite,
+                            "nslots", &r->ntasks) < 0)
         goto fail;
     if (version != 1) {
         errno = EINVAL;
