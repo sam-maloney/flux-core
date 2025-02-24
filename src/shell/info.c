@@ -38,20 +38,20 @@ struct jobspec *lookup_jobspec_get (flux_future_t *f)
     flux_error_t error;
     json_error_t json_error;
     const char *J;
-    char *jobspec;
-    struct jobspec *job;
+    char *jobspec = NULL;
+    struct jobspec *job = NULL;
+    const char *top_level_resource_type = NULL;
 
     if (flux_rpc_get_unpack (f, "{s:s}", "J", &J) < 0) {
         shell_log_error ("job-info: %s", future_strerror (f, errno));
         return NULL;
     }
-    if (!(jobspec = flux_unwrap_string (J, true, NULL, &error))) {
-        shell_log_error ("failed to unwrap J: %s", error.text);
-        return NULL;
-    }
-
     if (!(job = calloc (1, sizeof (*job)))) {
         shell_log_error ("Out of memory");
+        return NULL;
+    }
+    if (!(jobspec = flux_unwrap_string (J, true, NULL, &error))) {
+        shell_log_error ("failed to unwrap J: %s", error.text);
         return NULL;
     }
     if (!(job->jobspec = json_loads (jobspec, 0, &json_error))) {
@@ -69,9 +69,10 @@ struct jobspec *lookup_jobspec_get (flux_future_t *f)
      *  json_t * objects)
      */
     if (json_unpack_ex (job->jobspec, &json_error, 0,
-                        "{s:i s:o s:[{s:o s:o}] s:{s?{s?s s?O s?{s?O}}}}",
+                        "{s:i s:[{s:s}] s:[{s:o s:o}] s:{s?{s?s s?O s?{s?O}}}}",
                         "version", &job->version,
-                        "resources", &job->resources,
+                        "resources",
+                            "type", &top_level_resource_type,
                         "tasks",
                             "command", &job->command,
                             "count", &job->count,
@@ -82,11 +83,22 @@ struct jobspec *lookup_jobspec_get (flux_future_t *f)
                                 "shell", "options", &job->options) < 0) {
         goto error;
     }
-    return job;
+    /* Store a bool of whether "node" resource type was explicitly specified,
+     * the actual value must be determined and set later from R
+     */
+    if (!top_level_resource_type) {
+        set_error (&json_error, "Unable to parse top level resource type");
+        goto error;
+    }
+    job->node_count = streq (top_level_resource_type, "node") ? 1 : 0;
+    goto out;
 error:
     shell_log_error ("lookup_jobspec_get: %s", json_error.text);
     jobspec_destroy (job);
-    return NULL;
+    job = NULL;
+out:
+    free (jobspec);
+    return job;
 }
 
 /* Fetch J from the job-info service.
@@ -168,7 +180,6 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
     flux_future_t *f_info = NULL;
     flux_future_t *f_hwloc = NULL;
     const char *xml;
-    char *jobspec = NULL;
     json_error_t error;
 
     /*  fetch hwloc topology from resource module to avoid having to
@@ -211,7 +222,17 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
         shell_log_error ("error fetching jobspec");
         goto out;
     }
-    if (jobspec_parse (info->jobspec, &error) < 0) {
+
+    /*  Synchronously get initial version of R from first job-info
+     *  watch response:
+     */
+    if (resource_watch_update (info) < 0)
+        goto out;
+
+    /*  Parse jobspec after getting R such that resource ranges can
+     *  be resolved with true allocation in R:
+     */
+    if (jobspec_parse (info, &error) < 0) {
         shell_log_error ("error parsing jobspec: %s", error.text);
         goto out;
     }
@@ -219,12 +240,6 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
         shell_warn ("Unsupported jobspec version: expected 1 got %d",
                     info->jobspec->version);
     }
-
-    /*  Synchronously get initial version of R from first job-info
-     *  watch response:
-     */
-    if (resource_watch_update (info) < 0)
-        goto out;
 
     /*  Register callback for future R updates:
      */
@@ -237,7 +252,6 @@ static int shell_init_jobinfo (flux_shell_t *shell, struct shell_info *info)
     }
     rc = 0;
 out:
-    free (jobspec);
     flux_future_destroy (f_hwloc);
     flux_future_destroy (f_info);
     return rc;
