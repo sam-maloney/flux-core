@@ -16,10 +16,11 @@
 #include "ccan/str/str.h"
 
 #include "jobspec.h"
+#include "rcalc.h"
 
 struct res_level {
     const char *type;
-    int count;
+    json_t *count;
     json_t *with;
 };
 
@@ -50,7 +51,7 @@ static int parse_res_level (json_t *o,
     /* For jobspec version 1, expect exactly one array element per level.
      */
     if (json_unpack_ex (o, &loc_error, 0,
-                        "{s:s s:i s?o}",
+                        "{s:s s:o s?o}",
                         "type", &res.type,
                         "count", &res.count,
                         "with", &res.with) < 0) {
@@ -73,16 +74,16 @@ void jobspec_destroy (struct jobspec *job)
 }
 
 static int recursive_parse_helper (struct jobspec *job,
-                                  json_t *curr_resource,
-                                  json_error_t *error,
-                                  int level,
-                                  int with_multiplier)
+                                   rcalc_t *r,
+                                   json_t *curr_resource,
+                                   json_error_t *error,
+                                   int level,
+                                   int multiplier)
 {
     size_t index;
     json_t *value;
     size_t size = json_array_size (curr_resource);
     struct res_level res;
-    int curr_multiplier;
 
     if (size == 0) {
         set_error (error, "Malformed jobspec: resource entry is not a list");
@@ -93,8 +94,6 @@ static int recursive_parse_helper (struct jobspec *job,
         if (parse_res_level (value, level, &res, error) < 0) {
             return -1;
         }
-
-        curr_multiplier = with_multiplier * res.count;
 
         if (streq (res.type, "node")) {
             if (job->slot_count > 0) {
@@ -110,7 +109,13 @@ static int recursive_parse_helper (struct jobspec *job,
                 return -1;
             }
 
-            job->node_count = curr_multiplier;
+            if (r) {
+                job->node_count = rcalc_total_nodes (r);
+            } else {
+                // if no R is provided, we assume counts are integers
+                job->node_count = multiplier * json_integer_value (res.count);
+            }
+            multiplier = job->node_count;
         } else if (streq (res.type, "slot")) {
             if (job->cores_per_slot > 0) {
                 set_error (error, "slot resource encountered after core resource");
@@ -121,11 +126,15 @@ static int recursive_parse_helper (struct jobspec *job,
                 return -1;
             }
 
-            job->slot_count = curr_multiplier;
+            if (!json_is_integer (res.count)) {
+                set_error (error, "count must be integer for slot resource");
+                return -1;
+            }
+            job->slot_count = multiplier * json_integer_value (res.count);
 
             // Reset the multiplier since we are now looking
             // to calculate the cores_per_slot value
-            curr_multiplier = 1;
+            multiplier = 1;
 
             // Check if we already encountered the `node` resource
             if (job->node_count > 0) {
@@ -145,19 +154,28 @@ static int recursive_parse_helper (struct jobspec *job,
                 return -1;
             }
 
-            job->cores_per_slot = curr_multiplier;
+            if (r) {
+                job->cores_per_slot = rcalc_total_cores (r) / job->slot_count;
+            } else {
+                // if no R is provided, we assume counts are integers
+                job->cores_per_slot = multiplier * json_integer_value (res.count);
+            }
             // N.B.: despite having found everything we were looking for (i.e.,
             // node, slot, and core resources), we have to keep recursing to
             // make sure their aren't additional erroneous node/slot/core
             // resources in the jobspec
+        } else {
+            // if res.type not "node", "slot", or "core", just update multiplier
+            multiplier *= json_integer_value (res.count);
         }
 
         if (res.with != NULL) {
             if (recursive_parse_helper (job,
+                                        r,
                                         res.with,
                                         error,
                                         level+1,
-                                        curr_multiplier)
+                                        multiplier)
                 < 0) {
                 return -1;
             }
@@ -189,6 +207,7 @@ static int recursive_parse_helper (struct jobspec *job,
  * entire jobspec.
  */
 static int recursive_parse_jobspec_resources (struct jobspec *job,
+                                              rcalc_t *r,
                                               json_t *curr_resource,
                                               json_error_t *error)
 {
@@ -202,7 +221,7 @@ static int recursive_parse_jobspec_resources (struct jobspec *job,
     job->slots_per_node = -1;
     job->node_count = -1;
 
-    int rc = recursive_parse_helper (job, curr_resource, error, 0, 1);
+    int rc = recursive_parse_helper (job, r, curr_resource, error, 0, 1);
 
     if ((rc == 0) && (job->cores_per_slot < 1)) {
         set_error (error, "Missing core resource");
@@ -211,7 +230,7 @@ static int recursive_parse_jobspec_resources (struct jobspec *job,
     return rc;
 }
 
-struct jobspec *jobspec_parse (const char *jobspec, json_error_t *error)
+struct jobspec *jobspec_parse (const char *jobspec, rcalc_t *r, json_error_t *error)
 {
     struct jobspec *job;
     json_t *resources;
@@ -261,7 +280,7 @@ struct jobspec *jobspec_parse (const char *jobspec, json_error_t *error)
         goto error;
     }
 
-    if (recursive_parse_jobspec_resources (job, resources, error) < 0) {
+    if (recursive_parse_jobspec_resources (job, r, resources, error) < 0) {
         // recursive_parse_jobspec_resources calls set_error
         goto error;
     }
