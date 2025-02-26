@@ -16,6 +16,7 @@
 #include "ccan/str/str.h"
 
 #include "jobspec.h"
+#include "rcalc.h"
 
 struct res_level {
     const char *type;
@@ -211,11 +212,12 @@ static int recursive_parse_jobspec_resources (struct jobspec *job,
     return rc;
 }
 
-struct jobspec *jobspec_parse (const char *jobspec, json_error_t *error)
+struct jobspec *jobspec_parse (const char *jobspec, rcalc_t *r, json_error_t *error)
 {
     struct jobspec *job;
     json_t *resources;
     json_t *count;
+    const char *type;
 
     if (!(job = calloc (1, sizeof (*job)))) {
         set_error (error, "Out of memory");
@@ -261,7 +263,23 @@ struct jobspec *jobspec_parse (const char *jobspec, json_error_t *error)
         goto error;
     }
 
-    if (recursive_parse_jobspec_resources (job, resources, error) < 0) {
+    if (r != NULL && rcalc_total_slots (r) > 0) {
+        job->slot_count = rcalc_total_slots (r);
+        job->cores_per_slot = rcalc_total_cores (r) / job->slot_count;
+        /* Check whether nodes were explicitly specified in jobspec
+         */
+        if (json_unpack_ex (resources, error, 0, "[{s:s}]", "type", &type) < 0) {
+            goto error;
+        }
+        if (streq (type, "node")) {
+            job->node_count = rcalc_total_nodes (r);
+            job->slots_per_node = job->slot_count / job->node_count;
+        }
+        else {
+            job->node_count = -1;
+            job->slots_per_node = -1;
+        }
+    } else if (recursive_parse_jobspec_resources (job, resources, error) < 0) {
         // recursive_parse_jobspec_resources calls set_error
         goto error;
     }
