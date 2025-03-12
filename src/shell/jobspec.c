@@ -193,6 +193,7 @@ static int recursive_parse_jobspec_resources (struct jobspec *job,
                                               json_t *curr_resource,
                                               json_error_t *error)
 {
+fprintf(stderr, "Still calculating resource info from jobspec\n");
     if (curr_resource == NULL) {
         set_error (error, "jobspec top-level resources empty");
         return -1;
@@ -264,6 +265,7 @@ struct jobspec *jobspec_parse (const char *jobspec, rcalc_t *r, json_error_t *er
     }
 
     if (r != NULL && rcalc_total_slots (r) > 0) {
+fprintf(stderr, "Now calculating resource info from R\n");
         job->slot_count = rcalc_total_slots (r);
         job->cores_per_slot = rcalc_total_cores (r) / job->slot_count;
         /* Check whether nodes were explicitly specified in jobspec
