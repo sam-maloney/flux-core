@@ -26,7 +26,7 @@ void set_error (json_error_t *error, const char *fmt, ...)
     }
 }
 
-struct range *create_range (json_t *json_range,
+struct range *range_create (json_t *json_range,
                             json_error_t *error)
 {
     struct range *range;
@@ -50,7 +50,6 @@ struct range *create_range (json_t *json_range,
         range->max = min;
         range->operator = '+';
         range->operand = 1;
-        range->current_value = min;
         range->last_value = min;
         return range;
     }
@@ -103,7 +102,6 @@ struct range *create_range (json_t *json_range,
         set_error (error, "create_range: max must be >= min");
         goto error;
     }
-    range->current_value = range->min;
     range->last_value = range->max < RANGE_MAX ? 0 : RANGE_MAX;
     return range;
 error:
@@ -113,44 +111,78 @@ error:
 
 unsigned int range_first (struct range *range)
 {
-    range->current_value = range->min;
-    return range->current_value;
+    return range->min;
 }
 
-unsigned int range_next (struct range *range)
+unsigned int range_next (struct range *range, unsigned int value)
 {
     switch (range->operator) {
         case '+':
-            range->current_value += range->operand;
+            value += range->operand;
             break;
         case '*':
-            range->current_value *= range->operand;
+            value *= range->operand;
             break;
         case '^': ;
-            unsigned int base = range->current_value;
+            unsigned int base = value;
             for (unsigned int i = 1; i < range->operand; ++i) {
-                range->current_value *= base;
+                value *= base;
             }
     }
-    if (range->current_value > range->max) {
-        range->current_value = RANGE_MAX;
+    if (value > range->max) {
+        value = RANGE_MAX;
     }
-    return range->current_value;
+    return value;
 }
 
 unsigned int range_last (struct range *range)
 {
     if (range->last_value == 0) {
-        if (range->current_value > range->max) {
-            range->current_value = range->min;
-        }
-        while (range->current_value <= range->max) {
-            range->last_value = range->current_value;
-            range_next (range);
+        unsigned int value = range->min;
+        while (value <= range->max) {
+            range->last_value = value;
+            range_next (range, value);
         }
     }
-    range->current_value = range->last_value;
     return range->last_value;
+}
+
+struct count *count_create (json_t *json_count,
+                            json_error_t *error)
+{
+    struct count *count;
+
+    if (!(count = calloc (1, sizeof (*count)))) {
+        set_error (error, "create_count: Out of memory");
+        goto error;
+    }
+    count->is_integer = false;
+    count->is_range = false;
+    count->is_idset = false;
+    if (json_is_integer (json_count)) {
+        count->integer = json_integer_value (json_count);
+        count->is_integer = true;
+    } else if (json_is_object (json_count)) {
+        if (!(count->range = range_create (json_count, error))) {
+            goto error;
+        }
+        count->is_range = true;
+    } else if (json_is_string (json_count)) {
+        if (!(count->idset = idset_decode (json_string_value (json_count)))) {
+            set_error (error,
+                       "create_count: Failed to decode '%s' as idset",
+                       json_string_value (json_count));
+            goto error;
+        }
+        count->is_idset = true;
+    } else {
+        set_error (error, "create_count: Malformed jobspec resource count");
+        goto error;
+    }
+    return count;
+error:
+    free (count);
+    return NULL;
 }
 
 /*

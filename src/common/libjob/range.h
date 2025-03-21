@@ -15,6 +15,8 @@
 #ifndef FLUX_RANGE_H
 #define FLUX_RANGE_H
 
+#include <stdbool.h>
+
 #include <jansson.h>
 
 #include <flux/idset.h>
@@ -26,14 +28,22 @@ struct range {
     unsigned int max;
     char operator;
     unsigned int operand;
-    unsigned int current_value;
     unsigned int last_value;
+};
+
+struct count {
+    bool is_integer;
+    bool is_range;
+    bool is_idset;
+    int integer;
+    struct range *range;
+    struct idset *idset;
 };
 
 /* Create a range from a json object.
  * Returns range on success, or NULL on failure with error->text set.
  */
-struct range *create_range (json_t *json_range,
+struct range *range_create (json_t *json_range,
                             json_error_t *error);
 
 /* Return the first (min) value in the range.
@@ -43,13 +53,58 @@ unsigned int range_first (struct range *range);
 /* Return the next value in the range.
  * Returns RANGE_MAX if value goes above the max.
  */
-unsigned int range_next (struct range *range);
+unsigned int range_next (struct range *range, unsigned int value);
 
 /* Returns the last value in the range.
  * N.B. this is not necessarily equal to the value stored in max.
  * The value is computed on first call and then stored.
  */
 unsigned int range_last (struct range *range);
+
+
+/* Create a count from a json object.
+ * Returns count on success, or NULL on failure with error->text set.
+ */
+struct count *count_create (json_t *json_count,
+                            json_error_t *error);
+
+/* Return the first value in the count.
+ */
+unsigned int count_first (struct count *count)
+{
+    if (count->is_integer) {
+        return count->integer;
+    }
+    return count->is_range ?
+           range_first (count->range) :
+           idset_first (count->idset);
+}
+
+/* Return the next value in the count.
+ * Returns RANGE_MAX if is_range==true and value goes above the max.
+ */
+unsigned int count_next (struct count *count, unsigned int value)
+{
+    if (count->is_integer) {
+        return count->integer;
+    }
+    return count->is_range ?
+           range_next (count->range, value) :
+           idset_next (count->idset, value);
+}
+
+/* Returns the last value in the count.
+ * If is_range==true the value is computed on first call and then stored.
+ */
+unsigned int count_last (struct count *count)
+{
+    if (count->is_integer) {
+        return count->integer;
+    }
+    return count->is_range ?
+           range_last (count->range) :
+           idset_last (count->idset);
+}
 
 #endif /* !FLUX_RANGE_H */
 
