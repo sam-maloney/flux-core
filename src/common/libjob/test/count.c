@@ -134,11 +134,67 @@ void test_codec (void)
     }
 }
 
+struct inout test_iteration_inputs[] = {
+    { "1", 0, "1" },
+    { "[13]", 0, "13" },
+    { "{\"min\": 4, \"max\": 6, \"operand\": 1, \"operator\": \"+\"}", 0, "4,5,6" },
+    { "{\"min\": 1, \"max\": 3, \"operand\": 2, \"operator\": \"+\"}", 0, "1,3" },
+
+    { NULL, 0, NULL },
+};
+
+void test_iteration (void)
+{
+    struct inout *ip;
+    char s[256];
+
+    for (ip = &test_iteration_inputs[0]; ip->in != NULL; ip++) {
+        struct count *count;
+
+        errno = 0;
+        count = count_decode (ip->in);
+        if (ip->out == NULL) { // expected fail
+//            if (count != NULL) {
+//                char *s = count_encode (count, ip->flags);
+//                ok (s == NULL && errno == EINVAL,
+//                    "count_encode flags=0x%x '%s' fails with EINVAL",
+//                    ip->flags, ip->in);
+//                free (s);
+//            } else {
+//                ok (count == NULL && errno == EINVAL,
+//                    "count_decode '%s' fails with EINVAL",
+//                    ip->flags, ip->in);
+//            }
+        }
+        else {
+            ok (count != NULL,
+                "count_decode JSON '%s' works", ip->in);
+            if (count != NULL) {
+                int i = 0;
+                int value = count_first (count);
+                while (value != COUNT_INVALID_VALUE) {
+                    i += sprintf (s+i, "%u, ", value);
+                    value = count_next (count, value);
+                }
+                s[i-2] = '\0';
+                bool match = streq (s, ip->out);
+                ok (match == true,
+                    "count iteration '%s'->'%s' works",
+                    ip->in, ip->out);
+                if (!match)
+                    diag ("%s", s);
+            }
+        }
+        count_destroy (count);
+    }
+}
+
 int main (int argc, char *argv[])
 {
     plan (NO_PLAN);
 
     test_codec ();
+    test_iteration ();
 
     done_testing ();
 }
