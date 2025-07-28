@@ -95,7 +95,6 @@ TESTSCRIPTS = \
 	t0020-terminus.t \
 	t0021-archive-cmd.t \
 	t0022-jj-reader.t \
-	t0023-jobspec1-validate.t \
 	t0026-flux-R.t \
 	t0090-content-enospc.t \
 	t0100-modprobe.t \
@@ -480,7 +479,6 @@ check_PROGRAMS = \
 	debug/stall \
 	hwloc/hwloc-convert \
 	hwloc/hwloc-version \
-	util/jobspec1-validate \
 	util/handle \
 	util/marshall
 
@@ -1157,11 +1155,6 @@ hwloc_hwloc_version_CPPFLAGS = $(HWLOC_CFLAGS) $(test_cppflags)
 hwloc_hwloc_version_LDADD = $(HWLOC_LIBS) \
 	$(test_ldadd)
 hwloc_hwloc_version_LDFLAGS = $(test_ldadd)
-
-util_jobspec1_validate_SOURCES = util/jobspec1-validate.c
-util_jobspec1_validate_CPPFLAGS = $(test_cppflags)
-util_jobspec1_validate_LDADD = $(test_ldadd)
-util_jobspec1_validate_LDFLAGS = $(test_ldflags)
 
 util_handle_SOURCES = util/handle.c
 util_handle_CPPFLAGS = $(test_cppflags)

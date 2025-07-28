@@ -15,9 +15,7 @@ AM_CPPFLAGS = \
 	$(FLUX_SECURITY_CFLAGS)
 
 noinst_LTLIBRARIES = libjob.la
-fluxcoreinclude_HEADERS = \
-	job.h \
-	jobspec1.h
+fluxcoreinclude_HEADERS = job.h
 
 libjob_la_SOURCES = \
 	job.c \
@@ -33,8 +31,6 @@ libjob_la_SOURCES = \
 	sign_none.h \
 	job_hash.c \
 	job_hash.h \
-	jobspec1.c \
-	jobspec1_private.h \
 	strtab.c \
 	strtab.h \
 	jj.c \
@@ -49,8 +45,7 @@ TESTS = \
 	test_count.t \
 	test_job.t \
 	test_sign_none.t \
-	test_unwrap.t \
-	test_jobspec1.t
+	test_unwrap.t
 
 check_PROGRAMS = \
 	$(TESTS)
@@ -84,10 +79,6 @@ test_sign_none_t_LDADD = $(test_ldadd)
 test_unwrap_t_SOURCES = test/unwrap.c
 test_unwrap_t_CPPFLAGS = $(test_cppflags)
 test_unwrap_t_LDADD = $(test_ldadd)
-
-test_jobspec1_t_SOURCES = test/jobspec1.c
-test_jobspec1_t_CPPFLAGS = $(test_cppflags)
-test_jobspec1_t_LDADD = $(test_ldadd)
 
 test_count_t_SOURCES = test/count.c
 test_count_t_CPPFLAGS = $(test_cppflags)
