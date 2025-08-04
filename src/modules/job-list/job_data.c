@@ -21,7 +21,8 @@
 #include "src/common/librlist/rlist.h"
 #include "src/common/librlist/rnode.h"
 #include "src/common/libccan/ccan/str/str.h"
-#include "src/common/libjob/jj.h"
+#include "src/common/libjob/jj_range.h"
+#include "src/common/libjob/count.h"
 #include "src/common/libjob/idf58.h"
 #include "src/common/libutil/jpath.h"
 #include "ccan/str/str.h"
@@ -206,13 +207,13 @@ static int parse_attributes_dict (struct job *job)
     return 0;
 }
 
-static int parse_jobspec_nnodes (struct job *job, struct jj_counts *jj)
+static int parse_jobspec_nnodes (struct job *job, struct jj_range_counts *jj)
 {
     /* Set job->nnodes if it is available, otherwise it will be set
      * later when R is available.
      */
     if (jj->nnodes)
-        job->nnodes = jj->nnodes;
+        job->nnodes = count_first (jj->nnodes);
     else
         job->nnodes = -1;
 
@@ -255,7 +256,7 @@ static int parse_per_resource (struct job *job,
     return 0;
 }
 
-static int parse_jobspec_ntasks (struct job *job, struct jj_counts *jj)
+static int parse_jobspec_ntasks (struct job *job, struct jj_range_counts *jj)
 {
     const char *type = NULL;
     int count = 0;
@@ -274,7 +275,7 @@ static int parse_jobspec_ntasks (struct job *job, struct jj_counts *jj)
          */
         if (streq (type, "node")) {
             if (jj->nnodes) {
-                job->ntasks = jj->nnodes * count;
+                job->ntasks = count_first (jj->nnodes) * count;
             } else {
                 /* if nnodes == 0, can't determine until nodes allocated.
                  * Set a flag / count to retrieve data later when
@@ -285,10 +286,12 @@ static int parse_jobspec_ntasks (struct job *job, struct jj_counts *jj)
             }
             return 0;
         } else if (streq (type, "core")) {
-            if (!jj->nnodes)
-                job->ntasks = jj->nslots * jj->slot_size * count;
-            else {
-                /* if nnodes > 0, can't determine until nodes
+            if (!jj->nnodes) {
+                job->ntasks = count_first (jj->nslots)
+                            * count_first (jj->slot_size)
+                            * count;
+            } else {
+                /* if nnodes != NULL, can't determine until nodes
                  * allocated and number of cores on node(s) are known.
                  * Set a flag / count to retrieve data later when
                  * R has been retrieved.
@@ -304,12 +307,16 @@ static int parse_jobspec_ntasks (struct job *job, struct jj_counts *jj)
                         "{s:[{s:{s:i}}]}",
                         "tasks",
                         "count",
-                        "total", &job->ntasks) < 0)
-        job->ntasks = jj->nslots;
+                        "total", &job->ntasks) < 0) {
+        job->ntasks = count_first (jj->nslots);
+        if (jj->nnodes) {
+            job->ntasks *= count_first (jj->nnodes);
+        }
+    }
     return 0;
 }
 
-static int parse_jobspec_ncores (struct job *job, struct jj_counts *jj)
+static int parse_jobspec_ncores (struct job *job, struct jj_range_counts *jj)
 {
     /* number of cores can't be determined yet, calculate later when R
      * is parsed */
@@ -318,8 +325,10 @@ static int parse_jobspec_ncores (struct job *job, struct jj_counts *jj)
         return 0;
     }
 
-    /* nslots already accounts for nnodes if available */
-    job->ncores = jj->nslots * jj->slot_size;
+    job->ncores = count_first (jj->nslots) * count_first (jj->slot_size);
+    if (jj->nnodes) {
+        job->ncores *= count_first (jj->nnodes);
+    }
     return 0;
 }
 
@@ -338,12 +347,12 @@ static int load_jobspec (struct job *job, const char *s, bool allow_nonfatal)
 
 static int parse_jobspec (struct job *job, bool allow_nonfatal)
 {
-    struct jj_counts jj;
+    struct jj_range_counts jj;
 
     if (parse_attributes_dict (job) < 0)
         goto nonfatal_error;
 
-    if (jj_get_counts_json (job->jobspec, &jj) < 0) {
+    if (jj_range_get_counts_json (job->jobspec, &jj) < 0) {
         flux_log (job->h, LOG_ERR,
                   "%s: job %s invalid jobspec; %s",
                   __FUNCTION__, idf58 (job->id), jj.error);
