@@ -331,7 +331,7 @@ class Jobspec(object):
             raise TypeError("slot must be a string")
 
         if "attributes" in task and not isinstance(task["attributes"], abc.Mapping):
-            raise TypeError("count must be a mapping")
+            raise TypeError("attributes must be a mapping")
 
         command = task["command"]
         if len(command) == 0:
