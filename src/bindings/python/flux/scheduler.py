@@ -80,7 +80,8 @@ class PendingJob:
         request (:class:`AllocRequest`): The open RFC 27 allocation request.
         resource_request: Pool-specific parsed resource request returned by
             :meth:`~ResourcePool.parse_resource_request`; passed to
-            :meth:`~ResourcePool.alloc` when scheduling.
+            :meth:`~ResourcePool.alloc` when scheduling.  The raw jobspec
+            dict is accessible as ``resource_request.jobspec``.
     """
 
     __slots__ = (
