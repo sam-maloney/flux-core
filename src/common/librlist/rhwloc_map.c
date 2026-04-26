@@ -113,6 +113,14 @@ out:
     return rc;
 }
 
+int rhwloc_map_count_type (rhwloc_map_t *m, const char *type)
+{
+    if (!m || !type) {
+        errno = EINVAL;
+        return -1;
+    }
+    return rhwloc_count_type (m->topo, type);
+}
 
 /* Return the PCI address of the GPU osdev object's nearest PCI ancestor
  * as a heap-allocated string, or NULL if no PCI ancestor is found.

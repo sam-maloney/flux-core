@@ -430,11 +430,10 @@ out:
     return result;
 }
 
-char *rhwloc_gpu_idset_string (hwloc_topology_t topo)
+static struct idset *rhwloc_gpu_idset (hwloc_topology_t topo)
 {
     int n_pci;
     int count = 0;
-    char *result = NULL;
     hwloc_obj_t *visited = NULL;
     struct idset *ids = NULL;
 
@@ -449,14 +448,49 @@ char *rhwloc_gpu_idset_string (hwloc_topology_t topo)
     count = collect_unique_gpus (topo, visited, n_pci, NULL, 0);
     if (count == 0
         || !(ids = idset_create (0, IDSET_FLAG_AUTOGROW))
-        || idset_range_set (ids, 0, count - 1) < 0)
-        goto out;
+        || idset_range_set (ids, 0, count - 1) < 0) {
+        idset_destroy (ids);
+        ids = NULL;
+    }
 
-    result = idset_encode (ids, IDSET_FLAG_RANGE);
-out:
-    idset_destroy (ids);
     ERRNO_SAFE_WRAP (free, visited);
+    return ids;
+}
+
+char *rhwloc_gpu_idset_string (hwloc_topology_t topo)
+{
+    struct idset *ids;
+    char *result = NULL;
+
+    if (!(ids = rhwloc_gpu_idset (topo)))
+        return NULL;
+    result = idset_encode (ids, IDSET_FLAG_RANGE);
+    idset_destroy (ids);
     return result;
+}
+
+int rhwloc_count_type (hwloc_topology_t topo, const char *name)
+{
+    hwloc_obj_type_t type;
+    int count;
+
+    if (streq (name, "gpu")) {
+        /* Handle GPU case manually since hwloc doesn't support it
+         */
+        struct idset *ids = rhwloc_gpu_idset (topo);
+        if (!ids)
+            return -1;
+        count = idset_count (ids);
+        idset_destroy (ids);
+        return count;
+    }
+
+    if (hwloc_type_sscanf (name, &type, NULL, 0) < 0
+        || (count = hwloc_get_nbobjs_by_type (topo, type)) < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return count;
 }
 
 struct rlist *rlist_from_hwloc (int rank, const char *xml)
