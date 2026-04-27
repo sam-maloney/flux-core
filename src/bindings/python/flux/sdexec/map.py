@@ -87,6 +87,7 @@ Python class name.  When omitted, :class:`HwlocMapper` is used.
 """
 
 import errno
+import math
 from pathlib import Path
 
 import flux
@@ -104,6 +105,77 @@ AMD_DRIVER = "amdgpu"
 
 # NVIDIA shared devices required for compute
 NVIDIA_SHARED_DEVICES = ["nvidiactl", "nvidia-uvm", "nvidia-uvm-tools"]
+
+# IEC binary suffixes for memory size strings (systemd convention)
+_SIZE_SUFFIXES = {
+    "K": 1024,
+    "M": 1024**2,
+    "G": 1024**3,
+    "T": 1024**4,
+}
+
+# Memory cap properties from exec.sdexec-properties that are scaled by the
+# ratio of allocated to total processing units on the node.  Only cap
+# properties (upper bounds on usage) are scaled; protection properties
+# (MemoryMin, MemoryLow) are not, as they represent per-job guarantees
+# rather than a node-level budget to divide.
+_SCALED_MEMORY_PROPS = (
+    "MemoryHigh",
+    "MemoryMax",
+    "MemorySwapMax",
+)
+
+
+def _parse_size(s):
+    """Parse a systemd memory size string.
+
+    Accepts absolute sizes with IEC binary suffixes (K, M, G, T, P, E),
+    plain byte counts, percentage values, or "infinity".
+
+    Returns:
+        (value: float, is_percent: bool). For absolute sizes value is in
+        bytes; for percentages value is the percentage (0.0-100.0);
+        for "infinity" returns (math.inf, False).
+
+    Raises:
+        ValueError: string is not a recognized memory size.
+    """
+    s = s.strip()
+    if s.lower() in ("infinity", "inf"):
+        return math.inf, False
+    if s.endswith("%"):
+        try:
+            return float(s[:-1]), True
+        except ValueError:
+            raise ValueError(f"invalid memory percentage: {s!r}")
+    if s[-1:].upper() in _SIZE_SUFFIXES:
+        try:
+            return float(s[:-1]) * _SIZE_SUFFIXES[s[-1].upper()], False
+        except ValueError:
+            raise ValueError(f"invalid memory size: {s!r}")
+    try:
+        return float(s), False
+    except ValueError:
+        raise ValueError(f"invalid memory size: {s!r}")
+
+
+def _scale_memory_prop(value_str, alloc, total):
+    """Scale a memory property value string by alloc/total ratio.
+
+    Returns the scaled value as a string (bytes integer for absolute sizes,
+    rounded integer percent for percentage values), or None if the value is
+    infinity or cannot be parsed.
+    """
+    try:
+        value, is_pct = _parse_size(value_str)
+    except ValueError:
+        return None
+    if math.isinf(value):
+        return None
+    scaled = value * alloc / total
+    if is_pct:
+        return f"{round(scaled)}%"
+    return str(int(scaled))
 
 
 class ResourceMapper:
@@ -415,6 +487,28 @@ class HwlocMapper(ResourceMapper):
 
         unique_devices = list(dict.fromkeys(devices))
         return {"DeviceAllow": ",".join(unique_devices)}
+
+    def finalize_properties(self, properties, R, extra_properties=None):
+        """Scale memory properties from extra_properties by the PU allocation ratio.
+
+        For each property in ``_SCALED_MEMORY_PROPS`` present in
+        *extra_properties*, scales it by the ratio of allocated to total
+        processing units on this node, provided ``AllowedCPUs`` was set by
+        :meth:`map_cores`.  Absolute sizes and percentage values are both
+        supported; "infinity" passes through unchanged.
+        """
+        super().finalize_properties(properties, R, extra_properties=extra_properties)
+        if extra_properties and "AllowedCPUs" in properties:
+            total_pus = self._lib.rhwloc_map_count_type(self._map, b"pu")
+            if total_pus > 0:
+                alloc_pus = len(IDset(properties["AllowedCPUs"]))
+                for prop in _SCALED_MEMORY_PROPS:
+                    value_str = extra_properties.get(prop)
+                    if value_str:
+                        scaled = _scale_memory_prop(value_str, alloc_pus, total_pus)
+                        if scaled is not None:
+                            properties[prop] = scaled
+        return properties
 
 
 def _build_R(cores=None, gpus=None):
