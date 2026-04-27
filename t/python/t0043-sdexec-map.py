@@ -425,14 +425,16 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that adds new properties."""
 
         class AccountingMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 properties.update(
                     {
                         "CPUAccounting": "true",
                         "MemoryAccounting": "true",
                     }
                 )
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = AccountingMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0"))
@@ -450,10 +452,12 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that modifies existing properties."""
 
         class OverrideMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Override CPU allocation to a fixed value
                 properties["AllowedCPUs"] = "0"
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = OverrideMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0-1"))
@@ -466,12 +470,14 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that adds properties conditionally based on R."""
 
         class ConditionalMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Add TasksMax only if DeviceAllow property is present (GPUs allocated)
                 if "DeviceAllow" in properties:
                     properties["TasksMax"] = "1"
                 # Call super to get default DevicePolicy behavior
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = ConditionalMapper(HWLOC_XML)
 
@@ -496,10 +502,12 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that removes properties."""
 
         class FilterMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Remove memory constraints
                 properties.pop("AllowedMemoryNodes", None)
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = FilterMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0"))

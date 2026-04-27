@@ -144,7 +144,7 @@ from flux.sdexec.map import HwlocMapper
 
 class MemoryHighMapper(HwlocMapper):
     """Mapper that adds MemoryHigh via finalize_properties."""
-    def finalize_properties(self, properties, R):
+    def finalize_properties(self, properties, R, extra_properties=None):
         properties["MemoryHigh"] = "1G"
         return properties
 PYEOF
