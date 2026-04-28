@@ -338,6 +338,7 @@ TESTSCRIPTS = \
 	python/t0040-proctitle.py \
 	python/t0041-resource-count.py \
 	python/t0042-job-manager-alloc-cache.py \
+	python/t0043-sdexec-map.py \
 	python/t1000-service-add-remove.py
 
 if HAVE_FLUX_SECURITY

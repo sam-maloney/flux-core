@@ -9,13 +9,24 @@
 # SPDX-License-Identifier: LGPL-3.0
 ###############################################################
 
+import errno
+import io
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import flux.sdexec.map as m
 import subflux  # noqa: F401 - for PYTHONPATH
+from flux.idset import IDset
 from flux.sdexec.map import HwlocMapper, ResourceMapper
 from pycotap import TAPTestRunner
+
+os.environ["PATH"] = (
+    os.path.dirname(subflux.flux_exe) + os.pathsep + os.environ.get("PATH", "")
+)
 
 
 def make_R(rank=0, cores=None, gpus=None):
@@ -288,15 +299,69 @@ class TestHwlocMapper(unittest.TestCase):
         self.assertEqual(kfd_count, 1, "/dev/kfd should only appear once")
 
 
+class TestDiscoverNvidiaErrors(unittest.TestCase):
+    """Test that _discover_nvidia_devices raises OSError on missing devices."""
+
+    def setUp(self):
+        self.mapper = HwlocMapper(HWLOC_XML)
+        self.pci_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+    def tearDown(self):
+        del self.mapper
+
+    def test_proc_info_absent_raises_enodev(self):
+        """ENODEV raised when /proc/driver/nvidia info file does not exist."""
+        with patch.object(Path, "exists", lambda self: False):
+            with self.assertRaises(OSError) as ctx:
+                self.mapper._discover_nvidia_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+    def test_nvidia_dev_absent_raises_enodev(self):
+        """ENODEV raised when Device Minor is found but /dev/nvidia<N> is absent."""
+        info_text = "Model: Test GPU\nDevice Minor: 0\n"
+
+        def exists(p):
+            return "information" in str(p)  # info_file present, /dev/nvidiaN absent
+
+        with patch.object(Path, "exists", exists):
+            with patch.object(Path, "read_text", lambda p, **kw: info_text):
+                with self.assertRaises(OSError) as ctx:
+                    self.mapper._discover_nvidia_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+
+class TestDiscoverAmdErrors(unittest.TestCase):
+    """Test that AMD device discovery raises OSError on missing devices."""
+
+    def setUp(self):
+        self.mapper = HwlocMapper(HWLOC_XML)
+        self.pci_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+    def tearDown(self):
+        del self.mapper
+
+    def test_kfd_absent_raises_enodev(self):
+        """ENODEV raised when /dev/kfd does not exist."""
+        with patch.object(Path, "exists", lambda self: False):
+            with self.assertRaises(OSError) as ctx:
+                self.mapper._discover_amd_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+    def test_no_dri_devices_raises_enodev(self):
+        """ENODEV raised when no /dev/dri devices are found for an AMD GPU."""
+        with patch.object(self.mapper, "_discover_drm_devices", return_value=[]):
+            with patch.object(self.mapper, "_get_driver_name", return_value="amdgpu"):
+                with self.assertRaises(OSError) as ctx:
+                    self.mapper._discover_gpu_devices("0000:01:00.0")
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+
 class TestCustomGpuMapper(unittest.TestCase):
     """Subclass overriding map_gpus; cores mapping is inherited from HwlocMapper."""
 
     def setUp(self):
         class NvidiaMapper(HwlocMapper):
             def map_gpus(self, gpus):
-                # Custom implementation returning vendor-specific device paths.
-                from flux.idset import IDset
-
                 if not gpus:
                     return {}
                 return {
@@ -467,14 +532,11 @@ class TestMain(unittest.TestCase):
 
     def _run_main(self, args, xml=HWLOC_XML):
         """Run main() with patched topology XML; return parsed JSON output."""
-        import io
-
-        import flux.sdexec.map as m
-
         captured = io.StringIO()
-        with patch.object(m, "_get_system_xml", return_value=xml):
-            with patch("sys.stdout", captured):
-                ret = m.main(args)
+        with patch.object(m, "_get_system_xml", return_value=xml), patch(
+            "sys.stdout", captured
+        ):
+            ret = m.main(args)
         self.assertEqual(ret, 0)
         return json.loads(captured.getvalue())
 
@@ -490,21 +552,15 @@ class TestMain(unittest.TestCase):
         self.assertEqual(result["AllowedMemoryNodes"], "0")
 
     def test_cores_and_gpus(self):
-        import io
-
-        import flux.sdexec.map as m
-
         fake_devs = {"0000:01:00.0": ["/dev/dri/renderD128 rw"]}
         captured = io.StringIO()
-        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML):
-            with patch.object(
-                m.HwlocMapper,
-                "_discover_gpu_devices",
-                autospec=True,
-                side_effect=lambda self, addr: fake_devs.get(addr, []),
-            ):
-                with patch("sys.stdout", captured):
-                    ret = m.main(["--cores=0", "--gpus=0"])
+        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML), patch.object(
+            m.HwlocMapper,
+            "_discover_gpu_devices",
+            autospec=True,
+            side_effect=lambda self, addr: fake_devs.get(addr, []),
+        ), patch("sys.stdout", captured):
+            ret = m.main(["--cores=0", "--gpus=0"])
         self.assertEqual(ret, 0)
         result = json.loads(captured.getvalue())
         self.assertEqual(result["AllowedCPUs"], "0-1")
@@ -512,17 +568,10 @@ class TestMain(unittest.TestCase):
         self.assertEqual(result["DevicePolicy"], "closed")
 
     def test_xml_file(self):
-        import os
-        import tempfile
-
-        import flux.sdexec.map as m
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as fh:
             fh.write(HWLOC_XML)
             fname = fh.name
         try:
-            import io
-
             captured = io.StringIO()
             with patch("sys.stdout", captured):
                 ret = m.main(["--xml", fname, "--cores=0"])
@@ -533,13 +582,10 @@ class TestMain(unittest.TestCase):
             os.unlink(fname)
 
     def test_error_returns_nonzero(self):
-        import flux.sdexec.map as m
-
-        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML):
-            with patch.object(
-                m.HwlocMapper, "map", side_effect=OSError("mock failure")
-            ):
-                ret = m.main(["--cores=0"])
+        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML), patch.object(
+            m.HwlocMapper, "map", side_effect=OSError("mock failure")
+        ):
+            ret = m.main(["--cores=0"])
         self.assertEqual(ret, 1)
 
 

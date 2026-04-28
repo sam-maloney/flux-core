@@ -34,7 +34,8 @@ GPU Device Discovery
 device paths needed for compute workloads:
 
 **NVIDIA GPUs:**
-    - ``/dev/nvidia<N>`` — Main GPU device (N matches hwloc GPU ID)
+    - ``/dev/nvidia<N>`` — Main GPU device (N is the kernel Device Minor, read
+      from ``/proc/driver/nvidia/gpus/<pci_addr>/information``)
     - ``/dev/nvidiactl`` — Control device (shared across all GPUs)
     - ``/dev/nvidia-uvm`` — Unified Virtual Memory (required for CUDA)
     - ``/dev/nvidia-uvm-tools`` — UVM tools (optional)
@@ -103,9 +104,6 @@ AMD_DRIVER = "amdgpu"
 
 # NVIDIA shared devices required for compute
 NVIDIA_SHARED_DEVICES = ["nvidiactl", "nvidia-uvm", "nvidia-uvm-tools"]
-
-# Device name prefixes
-DRM_CARD_PREFIX = "card"
 
 
 class ResourceMapper:
@@ -289,21 +287,27 @@ class HwlocMapper(ResourceMapper):
             List of DeviceAllow strings for NVIDIA devices.
         """
         devices = []
-        drm_path = pci_path / "drm"
 
+        # The Device Minor in /proc/driver/nvidia/gpus/<addr>/information is
+        # the authoritative index for /dev/nvidia<N>.  The DRM card number is
+        # assigned independently and must not be used as a substitute.
         gpu_index = None
-        if drm_path.exists():
-            for entry in drm_path.iterdir():
-                if entry.name.startswith(DRM_CARD_PREFIX):
-                    suffix = entry.name[len(DRM_CARD_PREFIX) :]
-                    if suffix.isdigit():
-                        gpu_index = int(suffix)
-                        break
+        info_file = Path("/proc/driver/nvidia/gpus") / pci_path.name / "information"
+        if info_file.exists():
+            for line in info_file.read_text().splitlines():
+                if line.startswith("Device Minor:"):
+                    gpu_index = int(line.split(":", 1)[1].strip())
+                    break
 
-        if gpu_index is not None:
-            nvidia_dev = Path(f"{DEV_PREFIX}/nvidia{gpu_index}")
-            if nvidia_dev.exists():
-                devices.append(f"{nvidia_dev} rw")
+        if gpu_index is None:
+            raise OSError(
+                errno.ENODEV,
+                f"GPU {pci_path.name}: Device Minor not found in {info_file}",
+            )
+        nvidia_dev = Path(f"{DEV_PREFIX}/nvidia{gpu_index}")
+        if not nvidia_dev.exists():
+            raise OSError(errno.ENODEV, f"GPU {pci_path.name}: {nvidia_dev} not found")
+        devices.append(f"{nvidia_dev} rw")
 
         for shared_dev in NVIDIA_SHARED_DEVICES:
             dev_path = Path(f"{DEV_PREFIX}/{shared_dev}")
@@ -320,13 +324,14 @@ class HwlocMapper(ResourceMapper):
 
         Returns:
             List of DeviceAllow strings for AMD devices.
-        """
-        devices = []
-        kfd_dev = Path(f"{DEV_PREFIX}/kfd")
-        if kfd_dev.exists():
-            devices.append(f"{kfd_dev} rw")
 
-        return devices
+        Raises:
+            OSError: If /dev/kfd is not found.
+        """
+        kfd_dev = Path(f"{DEV_PREFIX}/kfd")
+        if not kfd_dev.exists():
+            raise OSError(errno.ENODEV, f"GPU {pci_path.name}: {kfd_dev} not found")
+        return [f"{kfd_dev} rw"]
 
     def _discover_gpu_devices(self, pci_addr):
         """Discover all device nodes for a GPU at the given PCI address.
@@ -342,13 +347,19 @@ class HwlocMapper(ResourceMapper):
         pci_path = Path(f"{SYSFS_PCI_DEVICES}/{pci_addr}")
         devices = []
 
-        devices.extend(self._discover_drm_devices(pci_path))
+        drm_devices = self._discover_drm_devices(pci_path)
+        devices.extend(drm_devices)
 
         driver = self._get_driver_name(pci_path)
         if driver:
             if NVIDIA_DRIVER in driver:
                 devices.extend(self._discover_nvidia_devices(pci_path))
             elif AMD_DRIVER in driver:
+                if not drm_devices:
+                    raise OSError(
+                        errno.ENODEV,
+                        f"GPU {pci_addr}: no /dev/dri devices found",
+                    )
                 devices.extend(self._discover_amd_devices(pci_path))
 
         return devices
