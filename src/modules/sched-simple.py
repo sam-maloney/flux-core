@@ -27,6 +27,7 @@ following queue-depth aliases are also accepted::
 import errno
 import importlib.util
 import os
+
 from flux.job import JobID
 
 # sched-fifo is co-installed in the same directory; the hyphen in its name
