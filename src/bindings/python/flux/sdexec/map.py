@@ -34,7 +34,8 @@ GPU Device Discovery
 device paths needed for compute workloads:
 
 **NVIDIA GPUs:**
-    - ``/dev/nvidia<N>`` — Main GPU device (N matches hwloc GPU ID)
+    - ``/dev/nvidia<N>`` — Main GPU device (N is the kernel Device Minor, read
+      from ``/proc/driver/nvidia/gpus/<pci_addr>/information``)
     - ``/dev/nvidiactl`` — Control device (shared across all GPUs)
     - ``/dev/nvidia-uvm`` — Unified Virtual Memory (required for CUDA)
     - ``/dev/nvidia-uvm-tools`` — UVM tools (optional)
@@ -103,9 +104,6 @@ AMD_DRIVER = "amdgpu"
 
 # NVIDIA shared devices required for compute
 NVIDIA_SHARED_DEVICES = ["nvidiactl", "nvidia-uvm", "nvidia-uvm-tools"]
-
-# Device name prefixes
-DRM_CARD_PREFIX = "card"
 
 
 class ResourceMapper:
@@ -289,16 +287,17 @@ class HwlocMapper(ResourceMapper):
             List of DeviceAllow strings for NVIDIA devices.
         """
         devices = []
-        drm_path = pci_path / "drm"
 
+        # The Device Minor in /proc/driver/nvidia/gpus/<addr>/information is
+        # the authoritative index for /dev/nvidia<N>.  The DRM card number is
+        # assigned independently and must not be used as a substitute.
         gpu_index = None
-        if drm_path.exists():
-            for entry in drm_path.iterdir():
-                if entry.name.startswith(DRM_CARD_PREFIX):
-                    suffix = entry.name[len(DRM_CARD_PREFIX) :]
-                    if suffix.isdigit():
-                        gpu_index = int(suffix)
-                        break
+        info_file = Path("/proc/driver/nvidia/gpus") / pci_path.name / "information"
+        if info_file.exists():
+            for line in info_file.read_text().splitlines():
+                if line.startswith("Device Minor:"):
+                    gpu_index = int(line.split(":", 1)[1].strip())
+                    break
 
         if gpu_index is not None:
             nvidia_dev = Path(f"{DEV_PREFIX}/nvidia{gpu_index}")
