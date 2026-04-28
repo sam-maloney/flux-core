@@ -74,7 +74,7 @@ static char *get_unit_path (flux_t *h, const char *invocation_id)
                              "sdbus.call",
                              FLUX_NODEID_ANY,
                              0,
-                             "{s:s s:[o]}",
+                             "{s:s s:[O]}",
                              "member", "GetUnitByInvocationID",
                              "params", bytes))
         || flux_rpc_get_unpack (f, "{s:[s]}", "params", &path) < 0)
