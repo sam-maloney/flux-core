@@ -855,6 +855,104 @@ void test_cores_to_cpuset (void)
     hwloc_topology_destroy (topo);
 }
 
+/* Minimal topology: 1 core, 2 PCIDevs each with both CUDA and NVML osdev
+ * children.  Used to verify that each physical GPU is counted once despite
+ * appearing under two backends.
+ */
+static const char xml_multi_backend[] = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE topology SYSTEM \"hwloc.dtd\">\n\
+<topology>\n\
+  <object type=\"Machine\" os_index=\"0\"\
+ cpuset=\"0x00000003\" complete_cpuset=\"0x00000003\"\
+ online_cpuset=\"0x00000003\" allowed_cpuset=\"0x00000003\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\">\n\
+    <info name=\"HostName\" value=\"testhost\"/>\n\
+    <object type=\"NUMANode\" os_index=\"0\"\
+ cpuset=\"0x00000003\" complete_cpuset=\"0x00000003\"\
+ online_cpuset=\"0x00000003\" allowed_cpuset=\"0x00000003\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\" local_memory=\"8589934592\">\n\
+      <object type=\"Package\" os_index=\"0\"\
+ cpuset=\"0x00000003\" complete_cpuset=\"0x00000003\"\
+ online_cpuset=\"0x00000003\" allowed_cpuset=\"0x00000003\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\">\n\
+        <object type=\"Core\" os_index=\"0\"\
+ cpuset=\"0x00000003\" complete_cpuset=\"0x00000003\"\
+ online_cpuset=\"0x00000003\" allowed_cpuset=\"0x00000003\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\">\n\
+          <object type=\"PU\" os_index=\"0\"\
+ cpuset=\"0x00000001\" complete_cpuset=\"0x00000001\"\
+ online_cpuset=\"0x00000001\" allowed_cpuset=\"0x00000001\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\"/>\n\
+          <object type=\"PU\" os_index=\"1\"\
+ cpuset=\"0x00000002\" complete_cpuset=\"0x00000002\"\
+ online_cpuset=\"0x00000002\" allowed_cpuset=\"0x00000002\"\
+ nodeset=\"0x00000001\" complete_nodeset=\"0x00000001\"\
+ allowed_nodeset=\"0x00000001\"/>\n\
+        </object>\n\
+      </object>\n\
+    </object>\n\
+    <object type=\"Bridge\" os_index=\"0\" bridge_type=\"0-1\" depth=\"0\"\
+ bridge_pci=\"0000:[00-02]\">\n\
+      <object type=\"PCIDev\" os_index=\"4096\" name=\"Test GPU 0\"\
+ pci_busid=\"0000:01:00.0\" pci_type=\"0302 [10de:1234] [10de:0000] a1\"\
+ pci_link_speed=\"0.000000\">\n\
+        <object type=\"OSDev\" name=\"cuda0\" osdev_type=\"5\">\n\
+          <info name=\"CoProcType\" value=\"CUDA\"/>\n\
+          <info name=\"Backend\" value=\"CUDA\"/>\n\
+        </object>\n\
+        <object type=\"OSDev\" name=\"nvml0\" osdev_type=\"5\">\n\
+          <info name=\"CoProcType\" value=\"NVML\"/>\n\
+          <info name=\"Backend\" value=\"NVML\"/>\n\
+        </object>\n\
+      </object>\n\
+      <object type=\"PCIDev\" os_index=\"8192\" name=\"Test GPU 1\"\
+ pci_busid=\"0000:02:00.0\" pci_type=\"0302 [10de:1234] [10de:0000] a1\"\
+ pci_link_speed=\"0.000000\">\n\
+        <object type=\"OSDev\" name=\"cuda1\" osdev_type=\"5\">\n\
+          <info name=\"CoProcType\" value=\"CUDA\"/>\n\
+          <info name=\"Backend\" value=\"CUDA\"/>\n\
+        </object>\n\
+        <object type=\"OSDev\" name=\"nvml1\" osdev_type=\"5\">\n\
+          <info name=\"CoProcType\" value=\"NVML\"/>\n\
+          <info name=\"Backend\" value=\"NVML\"/>\n\
+        </object>\n\
+      </object>\n\
+    </object>\n\
+  </object>\n\
+</topology>\n";
+
+void test_gpu_objects (void)
+{
+    hwloc_topology_t topo;
+    hwloc_obj_t *objs;
+    int count;
+    char *s;
+
+    topo = rhwloc_xml_topology_load (xml_multi_backend, RHWLOC_NO_RESTRICT);
+    if (!topo)
+        BAIL_OUT ("failed to load multi-backend GPU topology");
+
+    /* 2 physical GPUs × 2 backends = 4 osdevs; dedup must yield 2 */
+    objs = rhwloc_gpu_objects (topo, &count);
+    ok (count == 2 && objs != NULL,
+        "rhwloc_gpu_objects: 2 dual-backend GPUs deduplicated to count=2");
+    free (objs);
+
+    s = rhwloc_gpu_idset_string (topo);
+    ok (s != NULL && strcmp (s, "0-1") == 0,
+        "rhwloc_gpu_idset_string: 2 dual-backend GPUs gives \"0-1\": got \"%s\"",
+        s ? s : "NULL");
+    free (s);
+
+    hwloc_topology_destroy (topo);
+}
+
 int main (int ac, char *av[])
 {
     plan (NO_PLAN);
@@ -863,6 +961,7 @@ int main (int ac, char *av[])
     test_hwloc (xml1);
     test_xml ();
     test_cores_to_cpuset ();
+    test_gpu_objects ();
 
     done_testing ();
 }

@@ -16,7 +16,6 @@
 #include <string.h>
 #include <flux/idset.h>
 
-#include "ccan/str/str.h"
 #include "src/common/libutil/errno_safe.h"
 
 #include "rhwloc.h"
@@ -114,59 +113,6 @@ out:
     return rc;
 }
 
-/* Return true if the hwloc backend string identifies a compute GPU.
- * Mirrors the logic in rhwloc_gpu_idset_string().
- */
-static bool backend_is_coproc (const char *s, const char *nvidia_backend)
-{
-    return (streq (s, nvidia_backend)
-            || streq (s, "OpenCL")
-            || streq (s, "RSMI"));
-}
-
-/* Collect compute GPU osdev objects from the topology in hwloc order into a
- * heap-allocated array.  Returns the array and sets *count_out, or returns
- * NULL if no GPUs are found or on allocation failure.  Caller must free().
- */
-static hwloc_obj_t *collect_gpu_objects (hwloc_topology_t topo, int *count_out)
-{
-    hwloc_obj_t obj = NULL;
-    hwloc_obj_t *result;
-    bool isCudaPresent = false;
-    const char *nvidia_backend;
-    int count = 0;
-
-    while ((obj = hwloc_get_next_osdev (topo, obj))) {
-        const char *s = hwloc_obj_get_info_by_name (obj, "Backend");
-        if (s && streq (s, "CUDA")) {
-            isCudaPresent = true;
-            break;
-        }
-    }
-    nvidia_backend = isCudaPresent ? "CUDA" : "NVML";
-
-    obj = NULL;
-    while ((obj = hwloc_get_next_osdev (topo, obj))) {
-        const char *s = hwloc_obj_get_info_by_name (obj, "Backend");
-        if (s && backend_is_coproc (s, nvidia_backend))
-            count++;
-    }
-    if (count == 0) {
-        *count_out = 0;
-        return NULL;
-    }
-    if (!(result = calloc (count, sizeof (*result))))
-        return NULL;
-    obj = NULL;
-    int i = 0;
-    while ((obj = hwloc_get_next_osdev (topo, obj)) && i < count) {
-        const char *s = hwloc_obj_get_info_by_name (obj, "Backend");
-        if (s && backend_is_coproc (s, nvidia_backend))
-            result[i++] = obj;
-    }
-    *count_out = count;
-    return result;
-}
 
 /* Return the PCI address of the GPU osdev object's nearest PCI ancestor
  * as a heap-allocated string, or NULL if no PCI ancestor is found.
@@ -203,7 +149,7 @@ char **rhwloc_map_gpu_pci_addrs (rhwloc_map_t *m, const char *gpus)
         goto error;
     if (!(result = calloc (idset_count (gpuset) + 1, sizeof (*result))))
         goto error;
-    if (!(gpu_objs = collect_gpu_objects (m->topo, &gpu_count))
+    if (!(gpu_objs = rhwloc_gpu_objects (m->topo, &gpu_count))
         && gpu_count > 0)
         goto error;
 
