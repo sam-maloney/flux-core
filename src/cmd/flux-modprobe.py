@@ -96,7 +96,7 @@ def show(args):
     M = Modprobe().configure_modules()
     set_alternatives(M, args.set_alternative)
     disable_modules(M, args.disable)
-    print(json.dumps(M.get_task(args.module).to_dict(), default=str))
+    print(json.dumps(M.resolve_service(args.module).to_dict(), default=str))
 
 
 def remove(args):

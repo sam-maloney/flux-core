@@ -223,6 +223,44 @@ class TaskDB:
             return max(tasks.values(), key=lambda e: (e.priority, e.index)).task
         return max(not_disabled.values(), key=lambda e: (e.priority, e.index)).task
 
+    def get_all(self, service: str) -> list:
+        """
+        Return all tasks providing ``service``, sorted by (priority, index).
+
+        Args:
+            service: Service or task name to look up
+
+        Returns:
+            List of Task objects sorted from lowest to highest priority.
+            Empty list if service doesn't exist.
+        """
+        if service not in self._services:
+            return []
+        tasks = self._services[service]
+        # Sort by (priority, index) ascending
+        sorted_entries = sorted(tasks.values(), key=lambda e: (e.priority, e.index))
+        return [e.task for e in sorted_entries]
+
+    def get_entry(self, service: str, task_name: str):
+        """
+        Get TaskEntry for a specific task providing a service.
+
+        Args:
+            service: Service name
+            task_name: Task name
+
+        Returns:
+            TaskEntry with priority, index, and task
+
+        Raises:
+            ValueError: If service or task not found
+        """
+        if service not in self._services:
+            raise ValueError(f"no such service {service}")
+        if task_name not in self._services[service]:
+            raise ValueError(f"task {task_name} does not provide {service}")
+        return self._services[service][task_name]
+
     def update(self, task: "Task") -> None:
         """
         Update an existing task in the database, or add it if not found.
@@ -328,10 +366,437 @@ class TaskDB:
         Returns:
             True if at least one non-disabled task provides service
         """
-        for task in [self.get(x) for x in tasks]:
+        for x in tasks:
+            task = self.get(x)
             if not task.disabled and service in (task.name, *task.provides):
                 return True
         return False
+
+
+class DependencySolver:
+    """
+    Handles all dependency resolution for modprobe tasks.
+
+    This class encapsulates the complex logic for resolving task dependencies,
+    including:
+    - Finding all required dependencies (requires)
+    - Filtering tasks based on needs constraints
+    - Building execution order precedence graphs (before/after)
+    - Finding safely removable modules
+
+    Separated from Modprobe class for clarity and testability.
+    """
+
+    def __init__(self, taskdb, context):
+        """
+        Initialize dependency solver.
+
+        Args:
+            taskdb: TaskDB instance for task lookup
+            context: Context instance for checking enabled status
+        """
+        self.taskdb = taskdb
+        self.context = context
+
+    def resolve_service(self, service: str, ignore_needs: bool = False):
+        """
+        Resolve service name to actual task, considering needs constraints.
+
+        Returns the highest priority task providing `service` that:
+        1. Is enabled (passes enabled() check with context)
+        2. Has all its needs satisfied (unless ignore_needs=True)
+
+        Falls back to highest priority task if no viable tasks exist.
+
+        Args:
+            service: Service or task name to resolve
+            ignore_needs: If True, skip needs checking (for explicit loads)
+
+        Returns:
+            Task object
+
+        Raises:
+            ValueError: If service doesn't exist in taskdb
+        """
+        candidates = self.taskdb.get_all(service)
+        if not candidates:
+            raise ValueError(f"no such task or module {service}")
+
+        # Find viable candidates (enabled + needs satisfied)
+        viable = []
+        for task in candidates:
+            if not task.enabled(self.context):
+                continue
+            if ignore_needs or self._needs_satisfied(task):
+                viable.append(task)
+
+        if viable:
+            # Return highest priority viable task
+            # Use TaskEntry priority (respects set_alternative bumps), not Task.priority
+            def priority_key(t):
+                entry = self.taskdb.get_entry(service, t.name)
+                return (entry.priority, entry.index)
+
+            return max(viable, key=priority_key)
+
+        # Fallback: return highest priority task even if not viable
+        return candidates[-1]  # get_all returns sorted, so last is highest
+
+    def _needs_satisfied(self, task, checking=None) -> bool:
+        """
+        Check if all of task's needs are satisfiable.
+
+        A need is satisfiable if there exists an enabled task providing
+        that service whose needs are also satisfied (checked recursively).
+
+        Args:
+            task: Task to check
+            checking: Set of task names currently being checked (prevents cycles)
+
+        Returns:
+            True if all needs are satisfied, False otherwise
+        """
+        if checking is None:
+            checking = set()
+
+        if task.name in checking:
+            return False  # Circular dependency
+
+        checking.add(task.name)
+
+        for need in task.needs:
+            if not self._has_enabled_provider(need, checking):
+                return False
+
+        return True
+
+    def _has_enabled_provider(self, service: str, checking: set) -> bool:
+        """
+        Check if any enabled task with satisfied needs provides this service.
+
+        Args:
+            service: Service name to check
+            checking: Set of task names being checked (prevents cycles)
+
+        Returns:
+            True if an enabled provider with satisfied needs exists
+        """
+        candidates = self.taskdb.get_all(service)
+        for task in candidates:
+            if not task.enabled(self.context):
+                continue
+            if task.name in checking:
+                continue  # Skip if we're already checking this task
+            if self._needs_satisfied(task, checking):
+                return True
+        return False
+
+    def solve_requirements(self, tasks, ignore_disabled=False) -> list:
+        """
+        Recursively find all requirements of tasks.
+
+        Args:
+            tasks: Iterable of task names to solve
+            ignore_disabled: If True, include disabled tasks in result
+
+        Returns:
+            List of task names including all required dependencies.
+            Disabled tasks are skipped unless ignore_disabled=True.
+            Does not modify input.
+        """
+        result = self._solve_requirements_impl(tasks, set(), set(), ignore_disabled)
+        return list(result)
+
+    def _solve_requirements_impl(self, tasks, visited, skipped, ignore_disabled):
+        """
+        Internal recursive implementation of solve_requirements.
+
+        Args:
+            tasks: Iterable of task names to solve
+            visited: Set of already-visited tasks (prevents infinite recursion)
+            skipped: Set of skipped (disabled) tasks
+            ignore_disabled: If True, include disabled tasks in result
+
+        Returns:
+            Set of task names including all required dependencies
+        """
+        result = set()
+        to_visit = [x for x in tasks if x not in visited]
+
+        for name in to_visit:
+            # Use resolve_service to get the right task (considering needs)
+            task = self.resolve_service(name, ignore_needs=ignore_disabled)
+            if ignore_disabled or task.enabled(self.context):
+                result.add(task.name)
+            else:
+                skipped.add(task.name)
+            visited.add(task.name)
+            if task.requires:
+                rset = self._solve_requirements_impl(
+                    tasks=task.requires,
+                    visited=visited,
+                    skipped=skipped,
+                    ignore_disabled=ignore_disabled,
+                )
+                result.update(rset)
+
+        return result
+
+    def solve_needs(self, tasks) -> list:
+        """
+        Filter out tasks where needs constraints are not met.
+
+        When a task is removed because a needed service is not available,
+        all tasks that need it are also recursively removed.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            New list of task names with unsatisfied needs removed.
+            Does not modify input.
+        """
+        # Work on a copy to avoid mutating caller's data
+        tasks_list = list(tasks)
+        removed = set()
+
+        def mark_for_removal(task_name):
+            """Recursively mark task and its dependents for removal"""
+            if task_name in removed or task_name not in tasks_list:
+                return
+
+            removed.add(task_name)
+
+            # Find what this task provides
+            task = self.resolve_service(task_name, ignore_needs=False)
+            provides_set = set((task.name, *task.provides))
+
+            # Mark all tasks that need this task for removal
+            for name in tasks_list:
+                if name not in removed:
+                    x = self.resolve_service(name, ignore_needs=False)
+                    if not provides_set.isdisjoint(x.needs):
+                        mark_for_removal(name)
+
+        # Check each task's needs
+        for name in tasks_list:
+            if name in removed:
+                continue
+            task = self.resolve_service(name, ignore_needs=False)
+            for need in task.needs:
+                if not self.taskdb.has_enabled_provider(tasks_list, need):
+                    mark_for_removal(name)
+                    break
+
+        # Return new list with removed tasks filtered out
+        return [name for name in tasks_list if name not in removed]
+
+    def solve_execution_order(self, tasks) -> dict:
+        """
+        Build precedence graph for tasks based on before/after constraints.
+
+        Args:
+            tasks: List/set of task names
+
+        Returns:
+            Dict mapping task names to list of predecessor task names
+
+        Note: If tasks is a set, a copy is made internally to avoid mutating
+        the input. Lists are always converted to sets internally.
+        """
+        if not isinstance(tasks, set):
+            tasks = set(tasks)
+        else:
+            tasks = set(tasks)  # Make a copy to avoid mutating caller's set
+        deps = {}
+
+        # Cache resolve_service calls to avoid repeated lookups
+        resolve_cache = {}
+
+        def resolve_cached(name):
+            if name not in resolve_cache:
+                resolve_cache[name] = self.resolve_service(name, ignore_needs=False)
+            return resolve_cache[name]
+
+        # Ensure tasks set contains all provides and the actual task name
+        # (since presence in the set determines if a task is included in
+        # the predecessor list below)
+        provides = set()
+        for task in tasks:
+            # Use resolve_service to get the right task (considering needs)
+            task = resolve_cached(task)
+            provides.add(task.name)
+            provides.update(task.provides)
+        tasks.update(provides)
+
+        for name in tasks:
+            task = resolve_cached(name)
+            if "*" in task.after:
+                # Add all tasks to deps (except those that also specify "*"
+                # in their 'after' list)
+                resolved_tasks = [(x, resolve_cached(x)) for x in tasks]
+                deps[task.name] = [
+                    t.name for x, t in resolved_tasks if "*" not in t.after
+                ]
+            else:
+                after_tasks = [resolve_cached(x).name for x in task.after]
+                deps[task.name] = [x for x in after_tasks if x in tasks]
+
+        # Process before constraints
+        self._process_before(tasks, deps, resolve_cache)
+
+        return deps
+
+    def _process_before(self, tasks, deps, resolve_cache=None):
+        """
+        Process task.before constraints by appending to successor predecessor lists.
+
+        Args:
+            tasks: Set of task names
+            deps: Dict of task names to predecessor lists (modified in place)
+            resolve_cache: Optional dict cache for resolve_service results
+        """
+        if resolve_cache is None:
+            resolve_cache = {}
+
+        def resolve_cached(name):
+            if name not in resolve_cache:
+                resolve_cache[name] = self.resolve_service(name, ignore_needs=False)
+            return resolve_cache[name]
+
+        def deps_add_all(name):
+            """Add name as a predecessor to all entries in deps"""
+            for task in [resolve_cached(x) for x in deps.keys()]:
+                if "*" not in task.before:
+                    deps[task.name].append(name)
+
+        for name in tasks:
+            task = resolve_cached(name)
+            for successor in task.before:
+                if successor == "*":
+                    deps_add_all(task.name)
+                else:
+                    # resolve real successor name:
+                    successor = resolve_cached(successor).name
+                    if successor in deps:
+                        deps[successor].append(task.name)
+
+    def get_requires(self, tasks) -> dict:
+        """
+        Get forward requires dependency map for tasks.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict mapping each task name to list of tasks it requires
+        """
+        deps = {}
+        for name in tasks:
+            task = self.resolve_service(name, ignore_needs=False)
+            deps[task.name] = list(task.requires)
+        return deps
+
+    def get_reverse_requires(self, tasks) -> dict:
+        """
+        Get reverse requires dependency map for tasks.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict mapping each task name to set of tasks that require it
+        """
+        rdeps = {}
+        for name in tasks:
+            task = self.resolve_service(name, ignore_needs=False)
+            for req in task.requires:
+                if req not in rdeps:
+                    rdeps[req] = set()
+                rdeps[req].add(task.name)
+        return rdeps
+
+    def solve_removal(self, dependencies: dict, modules_to_remove) -> list:
+        """
+        Find modules that can be safely removed.
+
+        Given a set of modules to remove and their dependency lists, finds
+        additional modules that can be removed because they no longer have
+        any dependents.
+
+        Args:
+            dependencies: Dict of modules to their dependency list
+            modules_to_remove: Iterable of modules to remove
+
+        Returns:
+            New list of modules that can be safely removed (includes original
+            modules plus cascaded removals). Does not modify inputs.
+
+        Raises:
+            ValueError: If any module to remove still has dependents
+        """
+        # Build reverse dependency map
+        dependents = {}
+        for dependent, reqs in dependencies.items():
+            for req in reqs:
+                if req not in dependents:
+                    dependents[req] = set()
+                dependents[req].add(dependent)
+
+        # Start with the items we're told to remove
+        removed_items = set(modules_to_remove)
+        result = list(modules_to_remove)
+
+        # Keep track of items to check in this iteration
+        modules_to_check = set(modules_to_remove)
+
+        while modules_to_check:
+            next_modules_to_check = set()
+
+            for removed_item in modules_to_check:
+                # Find all dependencies of the removed item (items it depended on)
+                if removed_item in dependencies:
+                    for dependency in dependencies[removed_item]:
+                        # Skip if this dependency is already being removed
+                        if dependency in removed_items:
+                            continue
+
+                        # Check if this dependency still has other items depending on it
+                        remaining_dependents = (
+                            dependents.get(dependency, set()) - removed_items
+                        )
+
+                        # If no remaining dependents, it can be removed
+                        if not remaining_dependents:
+                            removed_items.add(dependency)
+                            result.append(dependency)
+                            next_modules_to_check.add(dependency)
+
+            modules_to_check = next_modules_to_check
+
+        # Check if any removed modules still have dependents
+        # (build a clean view of dependents with removed items filtered out)
+        for name in result:
+            remaining = dependents.get(name, set()) - removed_items
+            # Also filter out by real task name in case of aliases
+            try:
+                self.taskdb.get(name)  # Verify task exists
+                remaining = {
+                    dep
+                    for dep in remaining
+                    if dep not in removed_items
+                    and self.taskdb.get(dep).name not in removed_items
+                }
+            except ValueError:
+                # Task doesn't exist in taskdb (e.g., nonexistent module)
+                # Just use the remaining set as-is
+                pass
+            if remaining:
+                raise ValueError(
+                    f"{name} still in use by " + ", ".join(sorted(remaining))
+                )
+
+        return result
 
 
 # ==============================================================================
@@ -866,6 +1331,9 @@ class Modprobe:
         self.handle = self.context.handle
         self.rank = self.handle.get_rank()
 
+        # Initialize dependency solver
+        self.solver = DependencySolver(self.taskdb, self.context)
+
         self.searchpath = {
             "toml": self._get_searchpath(),
             "py": self._get_searchpath(builtindir="libexecdir"),
@@ -933,8 +1401,31 @@ class Modprobe:
         self._active_tasks.append(task.name)
 
     def get_task(self, name, default=None):
-        """Return current task providing string 'name'"""
+        """
+        Return task by name from taskdb.
+
+        Note: This does NOT do service resolution. For service-aware lookup
+        (e.g., "sched" -> actual scheduler module), use resolve_service().
+        """
         return self.taskdb.get(name)
+
+    def resolve_service(self, name, ignore_needs=False):
+        """
+        Resolve service name to actual task using needs-aware resolution.
+
+        This is the public API for service resolution. It considers:
+        - Task enabled/disabled status
+        - Needs constraints (unless ignore_needs=True)
+        - Priority and alternatives
+
+        Args:
+            name: Service or task name to resolve
+            ignore_needs: If True, skip needs checking
+
+        Returns:
+            Task object that would be loaded for this service
+        """
+        return self.solver.resolve_service(name, ignore_needs)
 
     def has_task(self, name):
         """Return True if task exists in taskdb"""
@@ -1093,64 +1584,27 @@ class Modprobe:
 
     def _solve_tasks_recursive(self, tasks, visited=None, skipped=None):
         """Recursively find all requirements of 'tasks'"""
-
-        if visited is None:
-            visited = set()
-        if skipped is None:
-            skipped = set()
-        result = set()
-        to_visit = [x for x in tasks if x not in visited]
-
-        for name in to_visit:
-            task = self.get_task(name)
-            if task.enabled(self.context):
-                result.add(task.name)
-            else:
-                skipped.add(task.name)
-            visited.add(task.name)
-            if task.requires:
-                rset = self._solve_tasks_recursive(
-                    tasks=task.requires, visited=visited, skipped=skipped
-                )
-                result.update(rset)
-
-        return result
+        # New solver API doesn't expose visited/skipped (private impl detail)
+        # Legacy wrapper for backward compatibility if needed
+        return self.solver.solve_requirements(tasks)
 
     def _process_needs(self, tasks):
         """Remove all tasks in tasks where task.needs is not met"""
-
-        def remove_task_recursive(tasks, task):
-            # When a task is removed, recursively remove tasks that
-            # needed it:
+        result = self.solver.solve_needs(tasks)
+        # The new API returns a new list and doesn't call modprobe.disable().
+        # We need to detect what was removed and disable those tasks.
+        removed = set(tasks) - set(result)
+        for name in removed:
             try:
-                tasks.remove(task.name)
-            except ValueError:
-                # If task.name is not in current set of tasks it may be a
-                # provider, so disable the task instead:
-                self.disable(task.name)
-                return
-            provides_set = set((task.name, *task.provides))
-            for name in tasks:
-                x = self.get_task(name)
-                if not provides_set.isdisjoint(x.needs):
-                    # Task x needs task, remove it
-                    remove_task_recursive(tasks, x)
+                self.taskdb.disable(name)
+            except (ValueError, KeyError):
+                # Task may not exist or may be a provider alias
+                pass
+        return result
 
-        # Iterate over a copy of tasks list, removing tasks for which one
-        # or more "needs" is not satisfied. When removing a task, tasks
-        # that "need" that task are removed (recursively applied)
-        for name in tasks.copy():
-            task = self.get_task(name)
-            for need in task.needs:
-                if not self.taskdb.any_provides(tasks, need):
-                    if name in tasks:
-                        remove_task_recursive(tasks, task)
-
-        return tasks
-
-    def solve(self, tasks, timing=True):
+    def solve(self, tasks, timing=True, ignore_disabled=False):
         t0 = self.timestamp
-        result = self._solve_tasks_recursive(tasks)
+        result = self.solver.solve_requirements(tasks, ignore_disabled=ignore_disabled)
         if timing:
             self.add_timing("solve", t0)
         return result
@@ -1159,74 +1613,20 @@ class Modprobe:
         """Process any task.before by appending this task's name to all
         successor's predecessor list.
         """
-
-        def deps_add_all(name):
-            """Add name as a predecessor to all entries in deps"""
-            for task in [self.get_task(x) for x in deps.keys()]:
-                if "*" not in task.before:
-                    deps[task.name].append(name)
-
-        for name in tasks:
-            task = self.get_task(name)
-            for successor in task.before:
-                if successor == "*":
-                    deps_add_all(task.name)
-                else:
-                    # resolve real successor name:
-                    successor = self.get_task(successor).name
-                    if successor in deps:
-                        deps[successor].append(task.name)
+        return self.solver._process_before(tasks, deps)
 
     def get_deps(self, tasks):
         """Return dependencies for tasks as dict of names to predecessor list"""
         t0 = self.timestamp
-        if not isinstance(tasks, set):
-            tasks = set(tasks)
-        deps = {}
-
-        # Ensure tasks set contains all provides and the actual task name
-        # (since presence in the set determines if a task is included in
-        #  the predecessor list below)
-        provides = set()
-        for task in tasks:
-            task = self.get_task(task)
-            provides.add(task.name)
-            provides.update(task.provides)
-        tasks.update(provides)
-
-        for name in tasks:
-            task = self.get_task(name)
-            if "*" in task.after:
-                # Add all tasks to deps (except those that also specify "*"
-                # in their 'after' list)
-                deps[task.name] = [
-                    self.get_task(x).name
-                    for x in tasks
-                    if "*" not in self.get_task(x).after
-                ]
-            else:
-                after_tasks = [self.get_task(x).name for x in task.after]
-                deps[task.name] = [x for x in after_tasks if x in tasks]
-        self._process_before(tasks, deps)
+        deps = self.solver.solve_execution_order(tasks)
         self.add_timing("deps", t0)
-
         return deps
 
     def get_requires(self, tasks, reverse=False):
         """Return dependencies for tasks as dicts of names to dependencies"""
-        deps = {}
-        for name in tasks:
-            task = self.get_task(name)
-            deps[task.name] = list(task.requires)
         if reverse:
-            rdeps = {}
-            for dependent, reqs in deps.items():
-                for req in reqs:
-                    if req not in rdeps:
-                        rdeps[req] = set()
-                    rdeps[req].add(dependent)
-            return rdeps
-        return deps
+            return self.solver.get_reverse_requires(tasks)
+        return self.solver.get_requires(tasks)
 
     def run(self, deps):
         """Run all tasks in deps in precedence order"""
@@ -1331,9 +1731,16 @@ class Modprobe:
         Raises:
             FileExistsError: Target modules (and all their dependencies)
                 are already loaded, so there is nothing to do.
+
+        Note:
+            This method uses ignore_disabled=True to allow loading modules
+            that are disabled by configuration. This enables explicit loading
+            of non-default alternatives or disabled modules.
         """
         mlist = ModuleList(self.handle)
-        needed_modules = [x for x in self.solve(modules) if x not in mlist]
+        needed_modules = [
+            x for x in self.solve(modules, ignore_disabled=True) if x not in mlist
+        ]
 
         # Ensure explicitly requested modules are the current alternatives
         self._set_all_alternatives(needed_modules)
@@ -1357,66 +1764,7 @@ class Modprobe:
         Returns:
             list: modules that can be safely removed (including original list)
         """
-        dependents = {}
-        for dependent, reqs in dependencies.items():
-            for req in reqs:
-                if req not in dependents:
-                    dependents[req] = set()
-                dependents[req].add(dependent)
-
-        # Start with the items we're told to remove
-        removed_items = set(modules_to_remove)
-        newly_removable = []
-
-        # Keep track of items to check in this iteration
-        modules_to_check = set(modules_to_remove)
-
-        while modules_to_check:
-            next_modules_to_check = set()
-
-            for removed_item in modules_to_check:
-                # Find all dependencies of the removed item
-                # (items it depended on)
-                if removed_item in dependencies:
-                    for dependency in dependencies[removed_item]:
-                        # Skip if this dependency is already being removed
-                        if dependency in removed_items:
-                            continue
-
-                        # Check if this dependency still has other items
-                        # depending on it
-                        remaining_dependents = (
-                            dependents.get(dependency, set()) - removed_items
-                        )
-
-                        # If no remaining dependents, it can be removed
-                        if not remaining_dependents:
-                            removed_items.add(dependency)
-                            newly_removable.append(dependency)
-                            next_modules_to_check.add(dependency)
-
-            modules_to_check = next_modules_to_check
-
-        # Add newly removed items to list of items to remove
-        modules_to_remove.extend(newly_removable)
-
-        # Discard elements from dependents if they are being removed
-        for name in modules_to_remove:
-            for deps in dependents.values():
-                # discard both the name to remove and the real name
-                # of the task in case they are different
-                # (e.g. sched vs sched-simple):
-                deps.discard(name)
-                deps.discard(self.get_task(name).name)
-
-        # Raise an error if any removed modules still have dependents
-        for name in modules_to_remove:
-            if dependents.get(name):
-                raise ValueError(
-                    f"{name} still in use by " + ", ".join(dependents[name])
-                )
-
-        return modules_to_remove
+        return self.solver.solve_removal(dependencies, modules_to_remove)
 
     def _solve_modules_remove(self, modules=None):
         """Solve for a set of currently loaded modules to remove"""
