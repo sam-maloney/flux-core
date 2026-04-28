@@ -325,52 +325,78 @@ out:
     return result;
 }
 
-/*  Return true if the hwloc "backend" type string matches a GPU
- *   which should be indexed as a compute GPU.
+/*  Walk up from obj to the nearest HWLOC_OBJ_PCI_DEVICE ancestor, or NULL.
  */
-static bool backend_is_coproc (const char *s, const char *nvidia_backend)
+static hwloc_obj_t osdev_get_pcidev (hwloc_obj_t obj)
 {
-    /* Only count cudaX or nvmlX, openclX, and rmsiX devices for now */
-    return (streq (s, nvidia_backend)
+    hwloc_obj_t p = obj->parent;
+    while (p && p->type != HWLOC_OBJ_PCI_DEVICE)
+        p = p->parent;
+    return p;
+}
+
+/*  Return true if the hwloc "backend" type string matches a GPU
+ *  which should be indexed as a compute GPU.
+ */
+static bool backend_is_coproc (const char *s)
+{
+    return (streq (s, "CUDA")
+            || streq (s, "NVML")
             || streq (s, "OpenCL")
             || streq (s, "RSMI"));
 }
 
+static bool pcidev_visited (hwloc_obj_t *visited,
+                            int nvisited,
+                            hwloc_obj_t pcidev)
+{
+    if (pcidev) {
+        for (int i = 0; i < nvisited; i++) {
+            if (visited[i] == pcidev)
+                return true;
+        }
+    }
+    return false;
+}
+
 char * rhwloc_gpu_idset_string (hwloc_topology_t topo)
 {
-    int index;
+    int n_pci;
+    int index = 0;
+    int nvisited = 0;
     char *result = NULL;
     hwloc_obj_t obj = NULL;
+    hwloc_obj_t *visited = NULL;
     struct idset *ids = idset_create (0, IDSET_FLAG_AUTOGROW);
 
     if (!ids)
         return NULL;
 
-    /*  NVIDIA GPUs can be found by both the CUDA or NVML Backends.
-     *  We would like to catch either option, but not double count
-     *  if both are present, so make a first pass to see if any CUDA
-     *  osdevs are present, otherwise check NVML in the next loop.
-     */
-    bool isCudaPresent = false;
-    while ((obj = hwloc_get_next_osdev (topo, obj))) {
-        const char *s = hwloc_obj_get_info_by_name (obj, "Backend");
-        if (s && streq (s, "CUDA"))
-            isCudaPresent = true;
-    }
+    if ((n_pci = hwloc_get_nbobjs_by_type (topo, HWLOC_OBJ_PCI_DEVICE)) > 0
+        && !(visited = calloc (n_pci, sizeof (*visited))))
+        goto out;
 
     /*  Manually index GPUs -- os_index does not seem to be valid for
      *  these devices in some cases, and logical index also seems
-     *  incorrect (?)
+     *  incorrect (?).
+     *  Ensure GPUs are not counted twice when they apepar with multiple
+     *  backends by tracking visited devices by the PCI parent.
      */
-    index = 0;
     while ((obj = hwloc_get_next_osdev (topo, obj))) {
-        const char *s = hwloc_obj_get_info_by_name (obj, "Backend");
-        if (s && backend_is_coproc (s, isCudaPresent ? "CUDA" : "NVML"))
-            idset_set (ids, index++);
+        const char *backend = hwloc_obj_get_info_by_name (obj, "Backend");
+        hwloc_obj_t pcidev = osdev_get_pcidev (obj);
+        if (!backend
+            || !backend_is_coproc (backend)
+            || pcidev_visited (visited, nvisited, pcidev))
+            continue;
+        visited[nvisited++] = pcidev;
+        idset_set (ids, index++);
     }
     if (idset_count (ids) > 0)
         result = idset_encode (ids, IDSET_FLAG_RANGE);
+out:
     idset_destroy (ids);
+    ERRNO_SAFE_WRAP (free, visited);
     return result;
 }
 
