@@ -12,7 +12,7 @@
 import unittest
 
 import subflux  # noqa: F401
-from flux.modprobe import Task, TaskDB
+from flux.modprobe import DependencySolver, Task, TaskDB
 from pycotap import TAPTestRunner
 
 
@@ -302,6 +302,487 @@ class TestTaskDB(unittest.TestCase):
         # module-b is NOT automatically disabled by TaskDB
         # (that logic lives in Modprobe._process_needs)
         self.assertFalse(task_b.disabled)
+
+
+class MockContext:
+    """Minimal mock context for DependencySolver tests"""
+
+    def __init__(self, rank=0):
+        self.rank = rank
+        self._attrs = {}
+        self._config = {}
+        self._env = {}
+
+    def attr_get(self, attr, default=None):
+        return self._attrs.get(attr, default)
+
+    def conf_get(self, key, default=None):
+        return self._config.get(key, default)
+
+    def getenv(self, var, default=None):
+        return self._env.get(var, default)
+
+
+class TestDependencySolver(unittest.TestCase):
+    """Test DependencySolver implementation"""
+
+    def setUp(self):
+        """Set up common test fixtures"""
+        self.db = TaskDB()
+        self.context = MockContext()
+        self.solver = DependencySolver(self.db, self.context)
+
+    def test_solve_requirements_basic(self):
+        """Basic requirement resolution"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        result = self.solver.solve_requirements(["module-b"])
+        # Returns list, not set
+        self.assertEqual(set(result), {"module-a", "module-b"})
+
+    def test_solve_requirements_nested(self):
+        """Nested requirements (A requires B requires C)"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        result = self.solver.solve_requirements(["module-c"])
+        self.assertEqual(set(result), {"module-a", "module-b", "module-c"})
+
+    def test_solve_requirements_multiple(self):
+        """Task with multiple requirements"""
+        task_a = Task("module-a")
+        task_b = Task("module-b")
+        task_c = Task("module-c", requires=["module-a", "module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        result = self.solver.solve_requirements(["module-c"])
+        self.assertEqual(set(result), {"module-a", "module-b", "module-c"})
+
+    def test_solve_requirements_disabled_skipped(self):
+        """Disabled tasks are skipped but don't error"""
+        task_a = Task("module-a", disabled=True)
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        result = self.solver.solve_requirements(["module-b"])
+        # module-a is disabled, so not included
+        self.assertEqual(set(result), {"module-b"})
+
+    def test_solve_requirements_circular(self):
+        """Circular dependencies don't cause infinite loop"""
+        task_a = Task("module-a", requires=["module-b"])
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        result = self.solver.solve_requirements(["module-a"])
+        # Both should be included, visited set prevents infinite loop
+        self.assertEqual(set(result), {"module-a", "module-b"})
+
+    def test_solve_requirements_nonexistent_raises(self):
+        """Nonexistent requirement raises ValueError"""
+        task_a = Task("module-a", requires=["nonexistent"])
+        self.db.add(task_a)
+
+        with self.assertRaises(ValueError):
+            self.solver.solve_requirements(["module-a"])
+
+    def test_solve_requirements_rank_disabled(self):
+        """Tasks disabled by rank are skipped"""
+        task_a = Task("module-a", ranks="0")
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        # Set context rank to 1, so module-a is disabled
+        self.context.rank = 1
+        result = self.solver.solve_requirements(["module-b"])
+        self.assertEqual(set(result), {"module-b"})
+
+    def test_solve_needs_basic(self):
+        """Basic needs satisfaction - no mutation"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", needs=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        tasks = ["module-a", "module-b"]
+        result = self.solver.solve_needs(tasks)
+        # Both should remain since module-a provides what module-b needs
+        self.assertEqual(set(result), {"module-a", "module-b"})
+        # Input should not be mutated
+        self.assertEqual(tasks, ["module-a", "module-b"])
+
+    def test_solve_needs_missing_provider(self):
+        """Task removed when needed provider missing - no mutation"""
+        task_a = Task("module-a", needs=["module-b"])
+        self.db.add(task_a)
+
+        tasks = ["module-a"]
+        result = self.solver.solve_needs(tasks)
+        # module-a removed because module-b is not in tasks
+        self.assertEqual(result, [])
+        # Input should not be mutated
+        self.assertEqual(tasks, ["module-a"])
+
+    def test_solve_needs_disabled_provider(self):
+        """Task removed when all providers are disabled"""
+        task_a = Task("module-a", disabled=True)
+        task_b = Task("module-b", needs=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        tasks = ["module-a", "module-b"]
+        result = self.solver.solve_needs(tasks)
+        # module-b removed because module-a is disabled
+        self.assertEqual(set(result), {"module-a"})
+
+    def test_solve_needs_multiple_providers(self):
+        """Needs satisfied if any provider is enabled"""
+        task_a = Task("module-a", provides=["service"], disabled=True)
+        task_b = Task("module-b", provides=["service"])
+        task_c = Task("module-c", needs=["service"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        tasks = ["module-a", "module-b", "module-c"]
+        result = self.solver.solve_needs(tasks)
+        # All remain because module-b provides enabled service
+        self.assertEqual(set(result), {"module-a", "module-b", "module-c"})
+
+    def test_solve_needs_recursive_removal(self):
+        """Removing task cascades to tasks that need it"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", needs=["module-a"])
+        task_c = Task("module-c", needs=["module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        # Don't include module-a in tasks
+        tasks = ["module-b", "module-c"]
+        result = self.solver.solve_needs(tasks)
+        # Both removed: module-b needs module-a, module-c needs module-b
+        self.assertEqual(result, [])
+
+    def test_solve_needs_force_enabled_not_protected(self):
+        """Current behavior: force_enabled doesn't prevent needs removal"""
+        task_a = Task("module-a", needs=["nonexistent"])
+        task_a.force_enabled = True
+        self.db.add(task_a)
+
+        tasks = ["module-a"]
+        original_tasks = tasks.copy()
+        result = self.solver.solve_needs(tasks)
+        # Current behavior: still removed despite force_enabled
+        self.assertEqual(result, [])
+        # Input not mutated
+        self.assertEqual(tasks, original_tasks)
+
+    def test_solve_execution_order_basic(self):
+        """Basic before/after constraints"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", after=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        deps = self.solver.solve_execution_order(["module-a", "module-b"])
+        # module-b depends on module-a
+        self.assertEqual(deps["module-b"], ["module-a"])
+        self.assertEqual(deps["module-a"], [])
+
+    def test_solve_execution_order_before(self):
+        """Before constraints create reverse dependencies"""
+        task_a = Task("module-a", before=["module-b"])
+        task_b = Task("module-b")
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        deps = self.solver.solve_execution_order(["module-a", "module-b"])
+        # module-b depends on module-a (due to before)
+        self.assertEqual(deps["module-b"], ["module-a"])
+        self.assertEqual(deps["module-a"], [])
+
+    def test_solve_execution_order_wildcard_after(self):
+        """after=['*'] means after all other tasks"""
+        task_a = Task("module-a")
+        task_b = Task("module-b")
+        task_c = Task("module-c", after=["*"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = self.solver.solve_execution_order(["module-a", "module-b", "module-c"])
+        # module-c depends on both module-a and module-b
+        self.assertIn("module-a", deps["module-c"])
+        self.assertIn("module-b", deps["module-c"])
+
+    def test_solve_execution_order_wildcard_before(self):
+        """before=['*'] means before all other tasks"""
+        task_a = Task("module-a", before=["*"])
+        task_b = Task("module-b")
+        task_c = Task("module-c")
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = self.solver.solve_execution_order(["module-a", "module-b", "module-c"])
+        # module-b and module-c both depend on module-a
+        self.assertIn("module-a", deps["module-b"])
+        self.assertIn("module-a", deps["module-c"])
+
+    def test_solve_execution_order_with_provides(self):
+        """Tasks accessible by provides are included in graph"""
+        task_a = Task("module-a", provides=["service-x"])
+        task_b = Task("module-b", after=["service-x"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        deps = self.solver.solve_execution_order(["module-a", "module-b"])
+        # module-b depends on module-a (resolved via service-x)
+        self.assertEqual(deps["module-b"], ["module-a"])
+
+    def test_get_requires_basic(self):
+        """Basic requires dependency map"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-a", "module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = self.solver.get_requires(["module-a", "module-b", "module-c"])
+        self.assertEqual(deps["module-a"], [])
+        self.assertEqual(deps["module-b"], ["module-a"])
+        self.assertEqual(set(deps["module-c"]), {"module-a", "module-b"})
+
+    def test_get_reverse_requires(self):
+        """Reverse requires map shows who requires what"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        rdeps = self.solver.get_reverse_requires(["module-a", "module-b", "module-c"])
+        # module-a is required by module-b and module-c
+        self.assertEqual(rdeps["module-a"], {"module-b", "module-c"})
+
+    def test_solve_removal_basic(self):
+        """Basic module removal cascades to unused dependencies - no mutation"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        deps = {"module-a": [], "module-b": ["module-a"]}
+        modules_to_remove = ["module-b"]
+        original_modules = modules_to_remove.copy()
+        result = self.solver.solve_removal(deps, modules_to_remove)
+        # Both removed: module-b explicitly, module-a cascaded (no longer needed)
+        self.assertEqual(set(result), {"module-a", "module-b"})
+        # Input not mutated
+        self.assertEqual(modules_to_remove, original_modules)
+
+    def test_solve_removal_cascading(self):
+        """Removing module cascades to dependencies"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = {"module-a": [], "module-b": ["module-a"], "module-c": ["module-a"]}
+        result = self.solver.solve_removal(deps, ["module-b", "module-c"])
+        # All three removed: module-b, module-c, and module-a (no longer needed)
+        self.assertEqual(set(result), {"module-a", "module-b", "module-c"})
+
+    def test_solve_removal_with_dependents_raises(self):
+        """Cannot remove module with active dependents"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        deps = {"module-a": [], "module-b": ["module-a"]}
+        with self.assertRaises(ValueError) as ctx:
+            self.solver.solve_removal(deps, ["module-a"])
+        self.assertIn("still in use", str(ctx.exception))
+        self.assertIn("module-b", str(ctx.exception))
+
+    def test_solve_removal_deep_cascade(self):
+        """Deep dependency chain removal"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = {
+            "module-a": [],
+            "module-b": ["module-a"],
+            "module-c": ["module-b"],
+        }
+        result = self.solver.solve_removal(deps, ["module-c"])
+        # All cascade: module-c -> module-b -> module-a
+        self.assertEqual(set(result), {"module-a", "module-b", "module-c"})
+
+    def test_solve_removal_shared_dependency(self):
+        """Shared dependency not removed if still needed"""
+        task_a = Task("module-a")
+        task_b = Task("module-b", requires=["module-a"])
+        task_c = Task("module-c", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        deps = {"module-a": [], "module-b": ["module-a"], "module-c": ["module-a"]}
+        result = self.solver.solve_removal(deps, ["module-b"])
+        # Only module-b removed, module-a still needed by module-c
+        self.assertEqual(set(result), {"module-b"})
+
+    def test_solve_removal_missing_module_silent(self):
+        """Removing nonexistent module doesn't error (current behavior)"""
+        task_a = Task("module-a")
+        self.db.add(task_a)
+
+        deps = {"module-a": []}
+        # nonexistent-module not in deps, but should not error
+        result = self.solver.solve_removal(deps, ["nonexistent-module"])
+        self.assertEqual(result, ["nonexistent-module"])
+
+    def test_solve_requirements_ignore_disabled_false(self):
+        """Default behavior: disabled tasks are skipped"""
+        task_a = Task("module-a", disabled=True)
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        result = self.solver.solve_requirements(["module-b"], ignore_disabled=False)
+        # module-a is disabled, should not be included
+        self.assertEqual(set(result), {"module-b"})
+
+    def test_solve_requirements_ignore_disabled_true(self):
+        """With ignore_disabled=True, disabled tasks are included"""
+        task_a = Task("module-a", disabled=True)
+        task_b = Task("module-b", requires=["module-a"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+
+        result = self.solver.solve_requirements(["module-b"], ignore_disabled=True)
+        # module-a is disabled but should be included
+        self.assertEqual(set(result), {"module-a", "module-b"})
+
+    def test_solve_requirements_ignore_disabled_nested(self):
+        """ignore_disabled works recursively through requirements"""
+        task_a = Task("module-a", disabled=True)
+        task_b = Task("module-b", requires=["module-a"], disabled=True)
+        task_c = Task("module-c", requires=["module-b"])
+        self.db.add(task_a)
+        self.db.add(task_b)
+        self.db.add(task_c)
+
+        # Without ignore_disabled
+        result1 = self.solver.solve_requirements(["module-c"], ignore_disabled=False)
+        self.assertEqual(set(result1), {"module-c"})
+
+        # With ignore_disabled
+        result2 = self.solver.solve_requirements(["module-c"], ignore_disabled=True)
+        self.assertEqual(set(result2), {"module-a", "module-b", "module-c"})
+
+    def test_solve_requirements_ignore_disabled_directly_requested(self):
+        """ignore_disabled includes directly requested disabled module"""
+        task_a = Task("module-a", disabled=True)
+        self.db.add(task_a)
+
+        # Without ignore_disabled - skipped
+        result1 = self.solver.solve_requirements(["module-a"], ignore_disabled=False)
+        self.assertEqual(result1, [])
+
+        # With ignore_disabled - included
+        result2 = self.solver.solve_requirements(["module-a"], ignore_disabled=True)
+        self.assertEqual(result2, ["module-a"])
+
+    def test_resolve_service_prefers_lower_priority_with_satisfied_needs(self):
+        """
+        resolve_service should select lower-priority module when higher-priority
+        module has unsatisfied needs. This is the fluxion scenario.
+        """
+        # Create a module that high-priority module needs, but don't add it to taskdb
+        # (simulating that it's not available)
+
+        # Low priority module with no needs (like sched-simple)
+        simple = Task("sched-simple", provides=["sched"], priority=50)
+
+        # High priority module with unmet needs (like sched-fluxion-qmanager)
+        fluxion = Task(
+            "sched-fluxion-qmanager",
+            provides=["sched"],
+            needs=["resource"],  # resource module doesn't exist
+            priority=500,
+        )
+
+        self.db.add(simple)
+        self.db.add(fluxion)
+
+        # resolve_service should return simple, not fluxion, because fluxion's needs aren't met
+        result = self.solver.resolve_service("sched")
+        self.assertEqual(
+            result.name,
+            "sched-simple",
+            "Should select lower-priority sched-simple when fluxion needs not met",
+        )
+
+    def test_resolve_service_disabled_alternative_not_in_active_tasks(self):
+        """
+        When a high-priority alternative is disabled via priority bump but not loaded,
+        it should not be attempted to remove during rc3. This is the rc3 shutdown issue.
+        """
+        # Simulate the scenario:
+        # 1. default-module provides "test-service" at priority 100
+        # 2. high-priority-alt provides "test-service" at priority 500
+        # 3. set_alternative("test-service", "high-priority-alt") bumps priority to 501
+        # 4. But high-priority-alt is disabled, so only default-module is loaded
+        # 5. During rc3, we should only try to remove default-module, not high-priority-alt
+
+        default = Task("default-module", provides=["test-service"], priority=100)
+        high_pri = Task(
+            "high-priority-alt", provides=["test-service"], priority=500, disabled=True
+        )
+
+        self.db.add(default)
+        self.db.add(high_pri)
+
+        # Simulate what happens when user sets alternative but module is disabled
+        self.db.set_alternative("test-service", "high-priority-alt")
+
+        # resolve_service should return the enabled module (default-module)
+        # even though high-priority-alt has a higher priority
+        result = self.solver.resolve_service("test-service")
+        self.assertEqual(
+            result.name,
+            "default-module",
+            "Should return enabled module when alternative is disabled",
+        )
+
+        # Verify the disabled module is not selected even with its priority bump
+        # This prevents it from being added to active_tasks list and attempted removal in rc3
+        result2 = self.solver.resolve_service("test-service", ignore_needs=False)
+        self.assertEqual(result2.name, "default-module")
 
 
 if __name__ == "__main__":
