@@ -202,8 +202,10 @@ static void alloc_response_cb (flux_t *h,
         }
         job->R_redacted = json_incref (R);
         alloc_resource_status_invalidate (alloc);
-        if (annotations_update_and_publish (ctx, job, annotations) < 0)
-            flux_log_error (h, "annotations_update: id=%s", idf58 (id));
+        if (annotations) {
+            if (annotations_update_and_publish (ctx, job, annotations) < 0)
+                flux_log_error (h, "annotations_update: id=%s", idf58 (id));
+        }
 
         /*  Only modify job state after annotation event is published
          */
