@@ -51,8 +51,10 @@ to override :meth:`schedule`::
 import errno
 import functools
 import heapq
+import importlib.util
 import inspect
 import time
+from typing import Optional
 
 from _flux._core import ffi, lib
 from flux.brokermod import BrokerLogger, BrokerModule, request_handler
@@ -272,11 +274,21 @@ class Scheduler(BrokerModule):
     #: subclasses that support it) to disable partial-ok behaviour.
     hello_partial_ok = True
 
-    #: Extra keyword arguments forwarded to :class:`~flux.resource.ResourcePool`
-    #: (and on to the pool implementation) at construction time.  Subclasses
-    #: that accept pool-specific load-time options should parse them in
-    #: ``__init__`` and store the result here, e.g.
-    #: ``self.pool_kwargs = {"opt": value}``.
+    #: Custom pool class.  When set to a
+    #: :class:`~flux.resource.ResourcePool.ResourcePool` subclass,
+    #: :meth:`_make_pool` instantiates it directly instead of using the default
+    #: :class:`~flux.resource.ResourcePool.ResourcePool` version dispatch.
+    #: The subclass is responsible for its own version dispatch (e.g. via an
+    #: ``_impl_map``).  This is the preferred way to inject a custom pool::
+    #:
+    #:     class MyScheduler(Scheduler):
+    #:         pool_class = MyPool
+    pool_class: Optional[type] = None
+
+    #: Extra keyword arguments forwarded to the pool class at construction time.
+    #: Passed to whichever pool class is selected by :meth:`_make_pool` —
+    #: whether that is :attr:`pool_class`, a writer-discovered class, or the
+    #: default :class:`~flux.resource.ResourcePool`.
     pool_kwargs: dict = {}
 
     def __init_subclass__(cls, **kwargs):
@@ -310,6 +322,7 @@ class Scheduler(BrokerModule):
     def __init__(self, h, *args):
         super().__init__(h, *args)
         self.log.level = "info"
+        self.pool_kwargs = dict(self.pool_kwargs)
         self._resources = None
         self._acquire_rpc = None
         self._queue = []  # heapq of PendingJob, ordered by PendingJob.__lt__
@@ -1052,6 +1065,31 @@ class Scheduler(BrokerModule):
         """Register a dynamic service by name (synchronous)."""
         self.handle.service_register(name).get()
 
+    def _make_pool(self, R):
+        """Construct a resource pool from an R dict or JSON string.
+
+        When :attr:`pool_class` is set on the subclass, instantiates it
+        directly.  :attr:`pool_class` must be a
+        :class:`~flux.resource.ResourcePool.ResourcePool` subclass whose
+        constructor accepts ``(R, log=log)``.  Otherwise delegates to
+        :class:`~flux.resource.ResourcePool.ResourcePool`'s built-in
+        version dispatch.
+        """
+        if self.pool_class is not None:
+            if not (
+                isinstance(self.pool_class, type)
+                and issubclass(self.pool_class, ResourcePool)
+            ):
+                raise ValueError(
+                    f"pool_class must be a ResourcePool subclass, "
+                    f"got {self.pool_class!r}"
+                )
+            return self.pool_class(R, log=self.log, **self.pool_kwargs)
+        pool_class = self._pool_class_from_writer(R)
+        if pool_class is not None:
+            return pool_class(R, log=self.log, **self.pool_kwargs)
+        return ResourcePool(R, log=self.log, **self.pool_kwargs)
+
     def _acquire_resources(self):
         """Issue resource.acquire, process first response synchronously."""
         f = self.handle.rpc("resource.acquire", flags=FLUX_RPC_STREAMING)
@@ -1064,7 +1102,7 @@ class Scheduler(BrokerModule):
         R = data.get("resources")
         if R is None:
             raise OSError("resource.acquire: missing 'resources' field")
-        self._resources = ResourcePool(R, log=self.log, **self.pool_kwargs)
+        self._resources = self._make_pool(R)
 
         # Warn once about any pool_kwargs not recognised by this pool
         # implementation, then prune them so subsequent pool constructions
@@ -1160,12 +1198,12 @@ class Scheduler(BrokerModule):
             if free_ranks:
                 from flux.idset import IDset
 
-                rset = ResourcePool(R_dict, log=self.log, **self.pool_kwargs)
+                rset = self._make_pool(R_dict)
                 rset.remove_ranks(IDset(free_ranks))
                 R_dict = rset.to_dict()
 
             try:
-                R = ResourcePool(R_dict, log=self.log, **self.pool_kwargs)
+                R = self._make_pool(R_dict)
                 self.hello(
                     jobid,
                     data["priority"],
