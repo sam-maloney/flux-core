@@ -262,7 +262,9 @@ class BackfillScheduler(Scheduler):
                 shadow is not None and duration > 0.0 and now + duration <= shadow
             )
             if can_backfill and self._try_alloc(job, backfill=head.jobid):
-                self.log.debug(f"backfill: {JobID(job.jobid).f58} (shadow={shadow:.0f})")
+                self.log.debug(
+                    f"backfill: {JobID(job.jobid).f58} (shadow={shadow:.0f})"
+                )
             else:
                 kept.append(job)
             yield
