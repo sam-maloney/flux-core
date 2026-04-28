@@ -10,14 +10,23 @@
 ###############################################################
 
 import errno
+import io
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import flux.sdexec.map as m
 import subflux  # noqa: F401 - for PYTHONPATH
+from flux.idset import IDset
 from flux.sdexec.map import HwlocMapper, ResourceMapper
 from pycotap import TAPTestRunner
+
+os.environ["PATH"] = (
+    os.path.dirname(subflux.flux_exe) + os.pathsep + os.environ.get("PATH", "")
+)
 
 
 def make_R(rank=0, cores=None, gpus=None):
@@ -353,9 +362,6 @@ class TestCustomGpuMapper(unittest.TestCase):
     def setUp(self):
         class NvidiaMapper(HwlocMapper):
             def map_gpus(self, gpus):
-                # Custom implementation returning vendor-specific device paths.
-                from flux.idset import IDset
-
                 if not gpus:
                     return {}
                 return {
@@ -526,14 +532,11 @@ class TestMain(unittest.TestCase):
 
     def _run_main(self, args, xml=HWLOC_XML):
         """Run main() with patched topology XML; return parsed JSON output."""
-        import io
-
-        import flux.sdexec.map as m
-
         captured = io.StringIO()
-        with patch.object(m, "_get_system_xml", return_value=xml):
-            with patch("sys.stdout", captured):
-                ret = m.main(args)
+        with patch.object(m, "_get_system_xml", return_value=xml), patch(
+            "sys.stdout", captured
+        ):
+            ret = m.main(args)
         self.assertEqual(ret, 0)
         return json.loads(captured.getvalue())
 
@@ -549,21 +552,15 @@ class TestMain(unittest.TestCase):
         self.assertEqual(result["AllowedMemoryNodes"], "0")
 
     def test_cores_and_gpus(self):
-        import io
-
-        import flux.sdexec.map as m
-
         fake_devs = {"0000:01:00.0": ["/dev/dri/renderD128 rw"]}
         captured = io.StringIO()
-        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML):
-            with patch.object(
-                m.HwlocMapper,
-                "_discover_gpu_devices",
-                autospec=True,
-                side_effect=lambda self, addr: fake_devs.get(addr, []),
-            ):
-                with patch("sys.stdout", captured):
-                    ret = m.main(["--cores=0", "--gpus=0"])
+        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML), patch.object(
+            m.HwlocMapper,
+            "_discover_gpu_devices",
+            autospec=True,
+            side_effect=lambda self, addr: fake_devs.get(addr, []),
+        ), patch("sys.stdout", captured):
+            ret = m.main(["--cores=0", "--gpus=0"])
         self.assertEqual(ret, 0)
         result = json.loads(captured.getvalue())
         self.assertEqual(result["AllowedCPUs"], "0-1")
@@ -571,17 +568,10 @@ class TestMain(unittest.TestCase):
         self.assertEqual(result["DevicePolicy"], "closed")
 
     def test_xml_file(self):
-        import os
-        import tempfile
-
-        import flux.sdexec.map as m
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".xml", delete=False) as fh:
             fh.write(HWLOC_XML)
             fname = fh.name
         try:
-            import io
-
             captured = io.StringIO()
             with patch("sys.stdout", captured):
                 ret = m.main(["--xml", fname, "--cores=0"])
@@ -592,13 +582,10 @@ class TestMain(unittest.TestCase):
             os.unlink(fname)
 
     def test_error_returns_nonzero(self):
-        import flux.sdexec.map as m
-
-        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML):
-            with patch.object(
-                m.HwlocMapper, "map", side_effect=OSError("mock failure")
-            ):
-                ret = m.main(["--cores=0"])
+        with patch.object(m, "_get_system_xml", return_value=HWLOC_XML), patch.object(
+            m.HwlocMapper, "map", side_effect=OSError("mock failure")
+        ):
+            ret = m.main(["--cores=0"])
         self.assertEqual(ret, 1)
 
 
