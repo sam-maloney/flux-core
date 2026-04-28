@@ -51,6 +51,13 @@ hwloc_cpuset_t rhwloc_cores_to_cpuset (hwloc_topology_t topo,
  */
 char * rhwloc_core_idset_string (hwloc_topology_t topo);
 
+/*  Return heap-allocated array of unique compute GPU osdev objects from topo
+ *  in hwloc traversal order, one per physical GPU (deduplicated by PCI
+ *  ancestor).  Sets *count_out to the number of entries.  Returns NULL with
+ *  *count_out == 0 when no GPUs are present.  Caller must free().
+ */
+hwloc_obj_t *rhwloc_gpu_objects (hwloc_topology_t topo, int *count_out);
+
 /*  Return idset string for all GPUs in hwloc topology object
  */
 char * rhwloc_gpu_idset_string (hwloc_topology_t topo);

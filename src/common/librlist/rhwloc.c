@@ -12,6 +12,7 @@
 #include "config.h"
 #endif
 
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -340,6 +341,8 @@ static hwloc_obj_t osdev_get_pcidev (hwloc_obj_t obj)
  */
 static bool backend_is_coproc (const char *s)
 {
+    if (s == NULL)
+        return false;
     return (streq (s, "CUDA")
             || streq (s, "NVML")
             || streq (s, "OpenCL")
@@ -359,41 +362,97 @@ static bool pcidev_visited (hwloc_obj_t *visited,
     return false;
 }
 
-char * rhwloc_gpu_idset_string (hwloc_topology_t topo)
+/*  Traverse topology osdevs and accumulate unique compute GPUs.
+ *  visited[vlen] is a caller-provided zeroed work array; vlen bounds
+ *  visited writes. If result != NULL, unique GPU osdev objects are stored
+ *  there up to rlen entries. Returns the count of unique GPUs.
+ */
+static int collect_unique_gpus (hwloc_topology_t topo,
+                                hwloc_obj_t *visited,
+                                int vlen,
+                                hwloc_obj_t *result,
+                                int rlen)
 {
-    int n_pci;
-    int index = 0;
     int nvisited = 0;
-    char *result = NULL;
+    int count = 0;
     hwloc_obj_t obj = NULL;
-    hwloc_obj_t *visited = NULL;
-    struct idset *ids = idset_create (0, IDSET_FLAG_AUTOGROW);
-
-    if (!ids)
-        return NULL;
-
-    if ((n_pci = hwloc_get_nbobjs_by_type (topo, HWLOC_OBJ_PCI_DEVICE)) > 0
-        && !(visited = calloc (n_pci, sizeof (*visited))))
-        goto out;
 
     /*  Manually index GPUs -- os_index does not seem to be valid for
      *  these devices in some cases, and logical index also seems
      *  incorrect (?).
-     *  Ensure GPUs are not counted twice when they apepar with multiple
+     *  Ensure GPUs are not counted twice when they appear with multiple
      *  backends by tracking visited devices by the PCI parent.
      */
     while ((obj = hwloc_get_next_osdev (topo, obj))) {
         const char *backend = hwloc_obj_get_info_by_name (obj, "Backend");
         hwloc_obj_t pcidev = osdev_get_pcidev (obj);
-        if (!backend
-            || !backend_is_coproc (backend)
+        if (!backend_is_coproc (backend)
             || pcidev_visited (visited, nvisited, pcidev))
             continue;
-        visited[nvisited++] = pcidev;
-        idset_set (ids, index++);
+        if (nvisited < vlen)
+            visited[nvisited++] = pcidev;
+        if (result && count < rlen)
+            result[count] = obj;
+        count++;
     }
-    if (idset_count (ids) > 0)
-        result = idset_encode (ids, IDSET_FLAG_RANGE);
+    return count;
+}
+
+hwloc_obj_t *rhwloc_gpu_objects (hwloc_topology_t topo, int *count_out)
+{
+    int n_pci;
+    int count = 0;
+    hwloc_obj_t *visited = NULL;
+    hwloc_obj_t *result = NULL;
+
+    *count_out = 0;
+
+    /* Get total count of PCI devices to size the visited array:
+     */
+    n_pci = hwloc_get_nbobjs_by_type (topo, HWLOC_OBJ_PCI_DEVICE);
+    if (n_pci <= 0 || !(visited = calloc (n_pci, sizeof (*visited))))
+        return NULL;
+
+    /* Traverse topo first to get count of unique GPUs to size result
+     */
+    count = collect_unique_gpus (topo, visited, n_pci, NULL, 0);
+    if (count == 0 || !(result = calloc (count, sizeof (*result))))
+        goto out;
+
+    /* Reset visited and traverse again, this time collecting GPUs
+     * in result
+     */
+    memset (visited, 0, n_pci * sizeof (*visited));
+    collect_unique_gpus (topo, visited, n_pci, result, count);
+    *count_out = count;
+out:
+    ERRNO_SAFE_WRAP (free, visited);
+    return result;
+}
+
+char *rhwloc_gpu_idset_string (hwloc_topology_t topo)
+{
+    int n_pci;
+    int count = 0;
+    char *result = NULL;
+    hwloc_obj_t *visited = NULL;
+    struct idset *ids = NULL;
+
+    /* Count total PCI objects to size visited array:
+     */
+    n_pci = hwloc_get_nbobjs_by_type (topo, HWLOC_OBJ_PCI_DEVICE);
+    if (n_pci <= 0 || !(visited = calloc (n_pci, sizeof (*visited))))
+        return NULL;
+
+    /* Count unique GPUs (no need to collect actual objects):
+     */
+    count = collect_unique_gpus (topo, visited, n_pci, NULL, 0);
+    if (count == 0
+        || !(ids = idset_create (0, IDSET_FLAG_AUTOGROW))
+        || idset_range_set (ids, 0, count - 1) < 0)
+        goto out;
+
+    result = idset_encode (ids, IDSET_FLAG_RANGE);
 out:
     idset_destroy (ids);
     ERRNO_SAFE_WRAP (free, visited);
