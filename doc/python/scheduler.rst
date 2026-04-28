@@ -81,15 +81,11 @@ type and fields of this object are defined by the pool; scheduler policy code
 treats it as opaque and passes it directly to
 :meth:`~flux.resource.ResourcePool.alloc`.
 
-If you need the raw jobspec dict — for instance, to inspect job attributes in
-an :meth:`~Scheduler.alloc` override — it is passed as the *jobspec* parameter
-to :meth:`~Scheduler.alloc`:
-
-.. code-block:: python
-
-   def alloc(self, request, jobid, priority, userid, t_submit, jobspec):
-       # jobspec is the parsed dict; inspect it before calling super()
-       super().alloc(request, jobid, priority, userid, t_submit, jobspec)
+For the built-in :class:`~flux.resource.Rv1Pool` pools, node and slot counts
+carry RFC 14 ranges (a min and optional max), and non-standard resource
+hierarchies are traversed recursively.  The raw jobspec dict is also accessible
+as ``job.resource_request.jobspec`` for reading site-specific hints from
+``attributes.system``.
 
 Allocating resources
 ~~~~~~~~~~~~~~~~~~~~
@@ -164,8 +160,12 @@ distinct objects are created and stored together on the
 - ``job.resource_request`` — a pool-specific object describing *what the job
   needs*.  Created once from jobspec by
   :meth:`~flux.resource.ResourcePool.parse_resource_request` when the alloc
-  arrives.  For the built-in pools this carries fields for node count,
-  slot count, cores and GPUs per slot, duration, constraints, and exclusivity.
+  arrives.  For the built-in pools this carries node count, slot count, cores
+  and GPUs per slot, duration, constraints, and exclusivity; node and slot
+  counts carry RFC 14 ranges (min/max) and non-standard resource hierarchies
+  are traversed recursively.  The raw jobspec dict is accessible as
+  ``job.resource_request.jobspec`` for reading site-specific
+  ``attributes.system`` hints.
   Used by the scheduler during each :meth:`~Scheduler.schedule`
   pass to decide whether resources can be satisfied.  Persists for the
   lifetime of the pending job.
@@ -494,7 +494,7 @@ in :func:`mod_main` and are forwarded to ``__init__``:
 
    $ flux module load my-sched.py queue-depth=8 log-level=debug
 
-The base class automatically handles three built-in arguments:
+The base class automatically handles four built-in arguments:
 
 queue-depth=N|unlimited
     Maximum number of concurrent outstanding alloc requests (default 8, or
@@ -505,6 +505,15 @@ log-level=LEVEL
     Minimum log severity to emit.  *LEVEL* is one of ``emerg``, ``alert``,
     ``crit``, ``err``, ``warning``, ``notice``, ``info``, or ``debug``
     (default ``info``).
+
+pool-class=URI
+    Select a custom resource pool class at load time.  *URI* is resolved by
+    :meth:`~Scheduler._pool_class_from_uri`: a plain module name imports the
+    Python module and reads its ``pool_class`` attribute; ``module:ClassName``
+    loads a named class from the module.  The module must be importable, so
+    set ``PYTHONPATH`` as needed.  Equivalent to setting
+    :attr:`~Scheduler.pool_class` on the subclass, but applied at load time
+    without subclassing.  See `Pool class hook (pool_class)`_.
 
 Any argument not consumed by the subclass or the base class is rejected
 with an error at load time, so a typo like ``log_level=debug`` (underscore
@@ -641,6 +650,90 @@ replacing the default scheduler with your own:
 See :file:`t/t2306-sched-fifo.t` in the source tree for a comprehensive
 example covering annotations, priority, cancel, drain/undrain, and the
 hello/reload protocol.
+
+
+Customizing the resource pool
+-----------------------------
+
+By default the scheduler uses the built-in
+:class:`~flux.resource.ResourcePool.ResourcePool` version dispatch to
+construct its resource pool.  A custom pool class can be injected without
+modifying the scheduler itself using the pool class hook described below.
+
+Pool class hook (pool_class)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There are three ways to bind a custom pool class to a scheduler:
+
+1. **Class attribute** — set :attr:`~Scheduler.pool_class` on the subclass:
+
+   .. code-block:: python
+
+      from flux.scheduler import Scheduler
+
+      class RackScheduler(Scheduler):
+          pool_class = RackPool
+          # must also override schedule() to allocate jobs
+
+2. **Module argument** — pass ``pool-class=URI`` at load time (no subclassing
+   required):
+
+   .. code-block:: console
+
+      $ PYTHONPATH=/path/to/plugins flux module load sched-simple pool-class=rackpool
+
+3. **Writer auto-discovery** — if the system R carries a ``scheduling.writer``
+   URI pointing to a pool implementation, the scheduler loads it automatically
+   without any explicit argument.  See `Writer identification`_.
+
+In all three cases :attr:`~Scheduler.pool_class` must be a
+:class:`~flux.resource.ResourcePool.ResourcePool` subclass.  The scheduler's
+:meth:`~Scheduler._make_pool` helper checks :attr:`~Scheduler.pool_class`
+first (highest priority), then ``scheduling.writer`` auto-discovery, and
+finally falls back to the default :class:`~flux.resource.ResourcePool.ResourcePool`.
+In every case :attr:`~Scheduler.pool_kwargs` are forwarded as keyword
+arguments to the chosen pool constructor.
+
+The pool subclass is responsible for its own version dispatch.  The pattern is
+to map version integers to version-specific implementation classes in an
+``_impl_map`` and construct the right one in ``__init__``:
+
+.. code-block:: python
+
+   class RackPool(ResourcePool):
+       _impl_map = {1: _RackPoolV1}   # extend here to add Rv2 support
+
+       def __init__(self, R, log=None, **kwargs):
+           version = R.get("version", 1) if isinstance(R, Mapping) else 1
+           impl_class = self._impl_map.get(version)
+           if impl_class is None:
+               raise ValueError(f"R version {version} not supported by RackPool")
+           super().__init__(impl_class(R, log=log))
+
+
+The R.scheduling key
+--------------------
+
+R may carry a ``scheduling`` key in its top-level JSON object containing
+scheduler-specific topology metadata.  Schedulers use this key to encode
+information not captured in the standard R execution section — for example,
+rack or chassis membership, network topology, or fabric locality.
+:class:`~flux.resource.Rv1Pool` propagates the ``scheduling`` key to every
+allocated R by default.
+
+Writer identification
+~~~~~~~~~~~~~~~~~~~~~
+
+The ``scheduling`` key is defined by :doc:`rfc:spec_20`.  By convention it
+includes a ``writer`` URI identifying the scheduler that created it; a missing
+``writer`` implies ``fluxion``.
+
+When a scheduler starts and finds a ``scheduling.writer`` URI in the system R,
+:meth:`~Scheduler._pool_class_from_writer` resolves the URI to a pool class
+and :meth:`~Scheduler._make_pool` instantiates it automatically.  This enables
+a sub-instance scheduler to load the same pool class as the parent without any
+explicit configuration — the parent bakes the URI into every allocated R, and
+the sub-instance picks it up on startup.
 
 
 API reference
