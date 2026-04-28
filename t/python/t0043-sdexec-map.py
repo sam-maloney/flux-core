@@ -9,8 +9,10 @@
 # SPDX-License-Identifier: LGPL-3.0
 ###############################################################
 
+import errno
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import subflux  # noqa: F401 - for PYTHONPATH
@@ -286,6 +288,63 @@ class TestHwlocMapper(unittest.TestCase):
         devices_list = result["DeviceAllow"].split(",")
         kfd_count = sum(1 for d in devices_list if "kfd" in d)
         self.assertEqual(kfd_count, 1, "/dev/kfd should only appear once")
+
+
+class TestDiscoverNvidiaErrors(unittest.TestCase):
+    """Test that _discover_nvidia_devices raises OSError on missing devices."""
+
+    def setUp(self):
+        self.mapper = HwlocMapper(HWLOC_XML)
+        self.pci_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+    def tearDown(self):
+        del self.mapper
+
+    def test_proc_info_absent_raises_enodev(self):
+        """ENODEV raised when /proc/driver/nvidia info file does not exist."""
+        with patch.object(Path, "exists", lambda self: False):
+            with self.assertRaises(OSError) as ctx:
+                self.mapper._discover_nvidia_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+    def test_nvidia_dev_absent_raises_enodev(self):
+        """ENODEV raised when Device Minor is found but /dev/nvidia<N> is absent."""
+        info_text = "Model: Test GPU\nDevice Minor: 0\n"
+
+        def exists(p):
+            return "information" in str(p)  # info_file present, /dev/nvidiaN absent
+
+        with patch.object(Path, "exists", exists):
+            with patch.object(Path, "read_text", lambda p, **kw: info_text):
+                with self.assertRaises(OSError) as ctx:
+                    self.mapper._discover_nvidia_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+
+class TestDiscoverAmdErrors(unittest.TestCase):
+    """Test that AMD device discovery raises OSError on missing devices."""
+
+    def setUp(self):
+        self.mapper = HwlocMapper(HWLOC_XML)
+        self.pci_path = Path("/sys/bus/pci/devices/0000:01:00.0")
+
+    def tearDown(self):
+        del self.mapper
+
+    def test_kfd_absent_raises_enodev(self):
+        """ENODEV raised when /dev/kfd does not exist."""
+        with patch.object(Path, "exists", lambda self: False):
+            with self.assertRaises(OSError) as ctx:
+                self.mapper._discover_amd_devices(self.pci_path)
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
+
+    def test_no_dri_devices_raises_enodev(self):
+        """ENODEV raised when no /dev/dri devices are found for an AMD GPU."""
+        with patch.object(self.mapper, "_discover_drm_devices", return_value=[]):
+            with patch.object(self.mapper, "_get_driver_name", return_value="amdgpu"):
+                with self.assertRaises(OSError) as ctx:
+                    self.mapper._discover_gpu_devices("0000:01:00.0")
+        self.assertEqual(ctx.exception.errno, errno.ENODEV)
 
 
 class TestCustomGpuMapper(unittest.TestCase):
