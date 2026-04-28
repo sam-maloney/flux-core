@@ -27,6 +27,10 @@ from flux.idset import IDset
 from flux.utils import tomli as tomllib
 from flux.utils.graphlib import TopologicalSorter
 
+# ==============================================================================
+# SECTION 1: Utility Functions
+# ==============================================================================
+
 
 def run_all_rc_scripts(runlevel):
     """
@@ -101,6 +105,11 @@ def default_flux_confdir():
     return Path(conf_builtin_get("confdir"))
 
 
+# ==============================================================================
+# SECTION 2: Core Data Structures
+# ==============================================================================
+
+
 class RankConditional:
     """
     Conditional rank statement, e.g. ``>0``
@@ -160,6 +169,113 @@ def rank_conditional(arg):
     if arg.startswith((">", "<")):
         cls = RankConditional
     return cls(arg)
+
+
+class TaskDB:
+    """
+    Dict of service/module name to list of tasks sorted such the
+    current default task is at the end of the list.
+    """
+
+    TaskEntry = namedtuple("TaskEntry", ("priority", "index", "task"))
+
+    def __init__(self):
+        self.tasks = defaultdict(list)
+
+    def add(self, task, index=None):
+        for name in (*task.provides, task.name):
+            if index is None:
+                index = len(self.tasks[name])
+            bisect.insort_right(
+                self.tasks[name],
+                self.TaskEntry(task.priority, index, task),
+            )
+
+    def get(self, service):
+        """
+        Return the highest priority task providing ``service`` which is also
+        enabled. If there are no enabled tasks providing ``service``, then
+        return the highest priority task. If no tasks provide ``service``,
+        raise ``ValueError``.
+        """
+        if len(self.tasks[service]) == 0:
+            raise ValueError(f"no such task or module {service}")
+        enabled = list(filter(lambda x: x.task.enabled(), self.tasks[service]))
+        if len(enabled) == 0:
+            return self.tasks[service][-1].task
+        return enabled[-1].task
+
+    def update(self, task):
+        """
+        Update a task object which already resides in the taskdb by removing
+        the task from all service name lists and re-adding it, preserving the
+        original insertion order. This handles any potential update of a task,
+        such as a new ``priority``, or additional ``provides``
+        """
+        for name in (task.name, *task.provides):
+            to_remove = -1
+            for i, entry in enumerate(self.tasks[name]):
+                if entry.task == task:
+                    to_remove = i
+                    break
+            if to_remove < 0:
+                raise ValueError(f"{task.name} not found in taskdb {name} list")
+
+            # remove task from this list and re-insert, preserving the
+            # original insertion index:
+            self.tasks[name].pop(to_remove)
+            self.add(task, index=entry.index)
+
+    def set_alternative(self, service, name, propagate=True):
+        """Select a specific alternative 'name' for service"""
+        lst = self.tasks[service]
+        try:
+            index = next(i for i, x in enumerate(lst) if x.task.name == name)
+        except StopIteration:
+            raise ValueError(f"no module {name} provides {service}")
+
+        # nothing to do if list has length of 1
+        if len(lst) == 1:
+            return
+
+        # bump priority of new task and move to end of list:
+        entry = lst.pop(index)
+        priority = lst[-1].priority
+        lst.append(self.TaskEntry(priority + 1, entry.index, entry.task))
+
+        # now do the same for any other provides in this module
+        if propagate:
+            for provides in set(entry.task.provides) - {service}:
+                self.set_alternative(provides, name, propagate=False)
+
+    def disable(self, service):
+        """disable task/module/service with name 'service'"""
+        if not self.tasks[service]:
+            raise ValueError(f"no such module or task '{service}'")
+        for entry in self.tasks[service]:
+            entry.task.disabled = True
+
+    def enable(self, service):
+        """
+        Force a module/task/service to be enabled even if it would normally
+        be disabled by rank, needs-config, or needs-attr.
+        """
+        if not self.tasks[service]:
+            raise ValueError(f"no such module or task '{service}'")
+        for entry in self.tasks[service]:
+            entry.task.force_enabled = True
+
+    def any_provides(self, tasks, name):
+        """Return True if any task in tasks provides name"""
+        for task in [self.get(x) for x in tasks]:
+            if not task.disabled and name in (task.name, *task.provides):
+                return True
+        return False
+
+
+# ==============================================================================
+# SECTION 3: Task Definitions
+# ==============================================================================
 
 
 class Task:
@@ -405,108 +521,6 @@ class Module(Task):
         }
 
 
-class TaskDB:
-    """
-    Dict of service/module name to list of tasks sorted such the
-    current default task is at the end of the list.
-    """
-
-    TaskEntry = namedtuple("TaskEntry", ("priority", "index", "task"))
-
-    def __init__(self):
-        self.tasks = defaultdict(list)
-
-    def add(self, task, index=None):
-        for name in (*task.provides, task.name):
-            if index is None:
-                index = len(self.tasks[name])
-            bisect.insort_right(
-                self.tasks[name],
-                self.TaskEntry(task.priority, index, task),
-            )
-
-    def get(self, service):
-        """
-        Return the highest priority task providing ``service`` which is also
-        enabled. If there are no enabled tasks providing ``service``, then
-        return the highest priority task. If no tasks provide ``service``,
-        raise ``ValueError``.
-        """
-        if len(self.tasks[service]) == 0:
-            raise ValueError(f"no such task or module {service}")
-        enabled = list(filter(lambda x: x.task.enabled(), self.tasks[service]))
-        if len(enabled) == 0:
-            return self.tasks[service][-1].task
-        return enabled[-1].task
-
-    def update(self, task):
-        """
-        Update a task object which already resides in the taskdb by removing
-        the task from all service name lists and re-adding it, preserving the
-        original insertion order. This handles any potential update of a task,
-        such as a new ``priority``, or additional ``provides``
-        """
-        for name in (task.name, *task.provides):
-            to_remove = -1
-            for i, entry in enumerate(self.tasks[name]):
-                if entry.task == task:
-                    to_remove = i
-                    break
-            if to_remove < 0:
-                raise ValueError(f"{task.name} not found in taskdb {name} list")
-
-            # remove task from this list and re-insert, preserving the
-            # original insertion index:
-            self.tasks[name].pop(to_remove)
-            self.add(task, index=entry.index)
-
-    def set_alternative(self, service, name, propagate=True):
-        """Select a specific alternative 'name' for service"""
-        lst = self.tasks[service]
-        try:
-            index = next(i for i, x in enumerate(lst) if x.task.name == name)
-        except StopIteration:
-            raise ValueError(f"no module {name} provides {service}")
-
-        # nothing to do if list has length of 1
-        if len(lst) == 1:
-            return
-
-        # bump priority of new task and move to end of list:
-        entry = lst.pop(index)
-        priority = lst[-1].priority
-        lst.append(self.TaskEntry(priority + 1, entry.index, entry.task))
-
-        # now do the same for any other provides in this module
-        if propagate:
-            for provides in set(entry.task.provides) - {service}:
-                self.set_alternative(provides, name, propagate=False)
-
-    def disable(self, service):
-        """disable task/module/service with name 'service'"""
-        if not self.tasks[service]:
-            raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
-            entry.task.disabled = True
-
-    def enable(self, service):
-        """
-        Force a module/task/service to be enabled even if it would normally
-        be disabled by rank, needs-config, or needs-attr.
-        """
-        if not self.tasks[service]:
-            raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
-            entry.task.force_enabled = True
-
-    def any_provides(self, tasks, name):
-        """Return True if any task in tasks provides name"""
-        for task in [self.get(x) for x in tasks]:
-            if not task.disabled and name in (task.name, *task.provides):
-                return True
-        return False
-
-
 def task(name, **kwargs):
     """
     Decorator for modprobe "rc" task functions.
@@ -562,6 +576,11 @@ def task(name, **kwargs):
         return CodeTask(name, func, **kwargs)
 
     return create_task
+
+
+# ==============================================================================
+# SECTION 4: Execution Context
+# ==============================================================================
 
 
 class Context:
@@ -643,7 +662,7 @@ class Context:
         """Set or unset environment variables in the current process and broker.
 
         Variables set via this method that are not in the broker's env
-        blocklist will be inherited by rc2 and rc3.  A value of None
+        blocklist will be inherited by rc2 and rc3. A value of None
         causes the named variable to be unset.
 
         Note: concurrent calls from unrelated tasks running in parallel are
@@ -652,7 +671,7 @@ class Context:
 
         Args:
             name_or_env: a variable name string, or a dict mapping names
-                to values.  Values may be strings or None to unset.
+                to values. Values may be strings or None to unset.
             value: the value to set, when name_or_env is a string.
 
         Raises:
@@ -763,6 +782,11 @@ class ModuleList:
 
     def lookup(self, name):
         return self.servicemap.get(name, None)
+
+
+# ==============================================================================
+# SECTION 5: Main Orchestrator
+# ==============================================================================
 
 
 class Modprobe:
