@@ -8,7 +8,6 @@
 # SPDX-License-Identifier: LGPL-3.0
 ##############################################################
 
-import bisect
 import concurrent
 import glob
 import os
@@ -173,102 +172,164 @@ def rank_conditional(arg):
 
 class TaskDB:
     """
-    Dict of service/module name to list of tasks sorted such the
-    current default task is at the end of the list.
+    Task database supporting service alternatives and priority-based selection.
+
+    Structure: {service: {task_name: TaskEntry(priority, index, task)}}
+
+    Tasks are stored in a dict-of-dicts structure where each service maps to
+    a dict of task names to entries. Each entry is a TaskEntry namedtuple with
+    priority (int), insertion index (int), and task object. When selecting a
+    task for a service, the highest priority enabled task is chosen. If no
+    enabled tasks exist, the highest priority task overall is returned
+    regardless of enabled status.
     """
 
-    TaskEntry = namedtuple("TaskEntry", ("priority", "index", "task"))
+    TaskEntry = namedtuple("TaskEntry", ["priority", "index", "task"])
 
     def __init__(self):
-        self.tasks = defaultdict(list)
+        # {service: {task_name: TaskEntry(priority, index, task)}}
+        self._services = defaultdict(dict)
+        self._insertion_counter = 0
 
-    def add(self, task, index=None):
-        for name in (*task.provides, task.name):
-            if index is None:
-                index = len(self.tasks[name])
-            bisect.insort_right(
-                self.tasks[name],
-                self.TaskEntry(task.priority, index, task),
-            )
+    def add(self, task: "Task", index: int = None) -> None:
+        """Add task to database for its name and all services it provides"""
+        if index is None:
+            index = self._insertion_counter
+            self._insertion_counter += 1
+        entry = self.TaskEntry(task.priority, index, task)
+        for service in (task.name, *task.provides):
+            self._services[service][task.name] = entry
 
-    def get(self, service):
+    def get(self, service: str) -> "Task":
         """
-        Return the highest priority task providing ``service`` which is also
-        enabled. If there are no enabled tasks providing ``service``, then
-        return the highest priority task. If no tasks provide ``service``,
-        raise ``ValueError``.
+        Return the highest priority task providing ``service`` which is not
+        disabled. If there are no non-disabled tasks providing ``service``,
+        then return the highest priority task regardless of disabled status.
+        If no tasks provide ``service``, raise ``ValueError``.
+
+        Note: Only checks the `disabled` flag, not the full `enabled()` method
+        which requires context for rank/config/attr checks.
         """
-        if len(self.tasks[service]) == 0:
+        if service not in self._services or len(self._services[service]) == 0:
             raise ValueError(f"no such task or module {service}")
-        enabled = list(filter(lambda x: x.task.enabled(), self.tasks[service]))
-        if len(enabled) == 0:
-            return self.tasks[service][-1].task
-        return enabled[-1].task
 
-    def update(self, task):
+        tasks = self._services[service]
+        # Find non-disabled tasks with highest (priority, index)
+        not_disabled = {
+            name: entry for name, entry in tasks.items() if not entry.task.disabled
+        }
+        if not not_disabled:
+            # Return highest priority task even if disabled
+            return max(tasks.values(), key=lambda e: (e.priority, e.index)).task
+        return max(not_disabled.values(), key=lambda e: (e.priority, e.index)).task
+
+    def update(self, task: "Task") -> None:
         """
-        Update a task object which already resides in the taskdb by removing
-        the task from all service name lists and re-adding it, preserving the
-        original insertion order. This handles any potential update of a task,
-        such as a new ``priority``, or additional ``provides``
+        Update an existing task in the database, or add it if not found.
+
+        Updates the task object in place, preserving the original insertion
+        order. Handles updates to priority, provides list, and other attributes.
+
+        WARNING: If the task does not exist, it will be added automatically.
+        Use has() first if you need strict update-only semantics.
+
+        Args:
+            task: Task object to update (identified by task.name)
         """
-        for name in (task.name, *task.provides):
-            to_remove = -1
-            for i, entry in enumerate(self.tasks[name]):
-                if entry.task == task:
-                    to_remove = i
-                    break
-            if to_remove < 0:
-                raise ValueError(f"{task.name} not found in taskdb {name} list")
+        # First check if task exists in any service
+        found = False
+        for service in self._services:
+            if task.name in self._services[service]:
+                found = True
+                break
 
-            # remove task from this list and re-insert, preserving the
-            # original insertion index:
-            self.tasks[name].pop(to_remove)
-            self.add(task, index=entry.index)
-
-    def set_alternative(self, service, name, propagate=True):
-        """Select a specific alternative 'name' for service"""
-        lst = self.tasks[service]
-        try:
-            index = next(i for i, x in enumerate(lst) if x.task.name == name)
-        except StopIteration:
-            raise ValueError(f"no module {name} provides {service}")
-
-        # nothing to do if list has length of 1
-        if len(lst) == 1:
+        if not found:
+            # Task doesn't exist yet, add it
+            self.add(task)
             return
 
-        # bump priority of new task and move to end of list:
-        entry = lst.pop(index)
-        priority = lst[-1].priority
-        lst.append(self.TaskEntry(priority + 1, entry.index, entry.task))
+        # Update all services where this task should appear
+        for service in (task.name, *task.provides):
+            if service in self._services and task.name in self._services[service]:
+                old_entry = self._services[service][task.name]
+                # Preserve insertion order but update priority and task
+                self._services[service][task.name] = self.TaskEntry(
+                    task.priority,
+                    old_entry.index,
+                    task,
+                )
+            else:
+                # New service added to provides, add entry with preserved index
+                # Get the insertion index from any existing service
+                for existing_service in self._services:
+                    if task.name in self._services[existing_service]:
+                        index = self._services[existing_service][task.name].index
+                        entry = self.TaskEntry(task.priority, index, task)
+                        self._services[service][task.name] = entry
+                        break
 
-        # now do the same for any other provides in this module
+    def set_alternative(self, service: str, name: str, propagate: bool = True) -> None:
+        """Select a specific alternative 'name' for service"""
+        if service not in self._services:
+            raise ValueError(f"no such service {service}")
+        if name not in self._services[service]:
+            raise ValueError(f"no module {name} provides {service}")
+
+        tasks = self._services[service]
+        # nothing to do if only one alternative
+        if len(tasks) == 1:
+            return
+
+        # Find max priority and bump selected alternative above it
+        max_priority = max(e.priority for e in tasks.values())
+        entry = tasks[name]
+        tasks[name] = self.TaskEntry(max_priority + 1, entry.index, entry.task)
+
+        # Propagate to other services this task provides
         if propagate:
-            for provides in set(entry.task.provides) - {service}:
-                self.set_alternative(provides, name, propagate=False)
+            task = entry.task
+            for other_service in task.provides:
+                if other_service != service:
+                    self.set_alternative(other_service, name, propagate=False)
 
-    def disable(self, service):
-        """disable task/module/service with name 'service'"""
-        if not self.tasks[service]:
+    def disable(self, service: str) -> None:
+        """Disable all tasks providing this task/module/service"""
+        if service not in self._services or not self._services[service]:
             raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
+        for entry in self._services[service].values():
             entry.task.disabled = True
 
-    def enable(self, service):
+    def enable(self, service: str) -> None:
         """
         Force a module/task/service to be enabled even if it would normally
         be disabled by rank, needs-config, or needs-attr.
         """
-        if not self.tasks[service]:
+        if service not in self._services or not self._services[service]:
             raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
+        for entry in self._services[service].values():
             entry.task.force_enabled = True
 
-    def any_provides(self, tasks, name):
-        """Return True if any task in tasks provides name"""
+    def has(self, service: str) -> bool:
+        """
+        Check if a task/module/service exists in the database.
+
+        More efficient than calling get() and catching ValueError.
+        """
+        return service in self._services and len(self._services[service]) > 0
+
+    def has_enabled_provider(self, tasks, service: str) -> bool:
+        """
+        Check if any non-disabled task in tasks provides the given service.
+
+        Args:
+            tasks: Iterable of task names to check
+            service: Service name to look for
+
+        Returns:
+            True if at least one non-disabled task provides service
+        """
         for task in [self.get(x) for x in tasks]:
-            if not task.disabled and name in (task.name, *task.provides):
+            if not task.disabled and service in (task.name, *task.provides):
                 return True
         return False
 
@@ -865,7 +926,10 @@ class Modprobe:
 
     def add_active_task(self, task):
         """Add a task to the task db and active tasks list"""
-        self.add_task(task)
+        # Only add to taskdb if it doesn't exist yet (to preserve priority
+        # bumps from set_alternative() calls)
+        if not self.has_task(task.name):
+            self.add_task(task)
         self._active_tasks.append(task.name)
 
     def get_task(self, name, default=None):
