@@ -121,7 +121,7 @@ class RankConditional:
         return rank < self.rank
 
     def __str__(self):
-        s = ">" if self.gt else ">"
+        s = ">" if self.gt else "<"
         return f"{s}{self.rank}"
 
 
