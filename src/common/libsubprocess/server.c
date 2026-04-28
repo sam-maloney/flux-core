@@ -776,6 +776,7 @@ static void server_exec_cb (flux_t *h,
      */
     flux_cmd_unsetenv (cmd, "FLUX_PROXY_REMOTE");
     flux_cmd_unsetenv (cmd, "NOTIFY_SOCKET"); // see sd_notify(3)
+    flux_cmd_unsetenv (cmd, "INVOCATION_ID");
 
     if (!(p = flux_local_exec_ex (flux_get_reactor (s->h),
                                   local_flags,
