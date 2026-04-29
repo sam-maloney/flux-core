@@ -1768,7 +1768,11 @@ class Modprobe:
     def _set_all_alternatives(self, modules):
         # Set all modules as the current selected alternatives:
         for module in modules:
-            task = self.get_task(module)
+            try:
+                task = self.get_task(module)
+            except ValueError:
+                # Module not in taskdb (e.g., disabled or not configured)
+                continue
             for service in task.provides:
                 self.set_alternative(service, task.name)
 
