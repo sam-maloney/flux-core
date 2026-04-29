@@ -303,6 +303,102 @@ class TestTaskDB(unittest.TestCase):
         # (that logic lives in Modprobe._process_needs)
         self.assertFalse(task_b.disabled)
 
+    def test_set_alternative_priority_bump(self):
+        """set_alternative() correctly bumps priority above alternatives"""
+        from flux.modprobe import Module
+
+        db = TaskDB()
+
+        low = Module({"name": "low", "provides": ["service"]})
+        high = Module({"name": "high", "priority": 500, "provides": ["service"]})
+
+        db.add(low)
+        db.add(high)
+
+        # High priority module should win initially
+        self.assertEqual(db.get("service").name, "high")
+
+        # Set alternative to low priority module
+        db.set_alternative("service", "low")
+
+        # Now low should win despite lower original priority
+        self.assertEqual(db.get("service").name, "low")
+
+        # Verify priority was actually bumped above high
+        entry = db._services["service"]["low"]
+        self.assertGreater(entry.priority, 500)
+
+    def test_set_alternative_with_disabled(self):
+        """set_alternative() works correctly when alternatives are disabled"""
+        from flux.modprobe import Module
+
+        db = TaskDB()
+
+        sched_simple = Module(
+            {"name": "sched-simple", "provides": ["sched", "feasibility"]}
+        )
+
+        advanced = Module(
+            {
+                "name": "advanced-scheduler",
+                "priority": 500,
+                "provides": ["sched", "feasibility"],
+            }
+        )
+
+        db.add(sched_simple)
+        db.add(advanced)
+
+        # Disable the high-priority alternative
+        db.disable("advanced-scheduler")
+
+        # Low priority module should win when high priority is disabled
+        self.assertEqual(db.get("feasibility").name, "sched-simple")
+
+        # Set alternative to force sched-simple
+        db.set_alternative("sched", "sched-simple")
+
+        # Should still return sched-simple
+        self.assertEqual(db.get("feasibility").name, "sched-simple")
+
+        # Re-enable advanced-scheduler
+        advanced.disabled = False
+
+        # sched-simple should still win due to priority bump
+        self.assertEqual(db.get("feasibility").name, "sched-simple")
+
+    def test_add_does_not_preserve_priority_bump(self):
+        """taskdb.add() on existing task overwrites priority bumps (this is the bug)"""
+        from flux.modprobe import Module
+
+        db = TaskDB()
+
+        sched_simple = Module(
+            {"name": "sched-simple", "provides": ["sched", "feasibility"]}
+        )
+
+        advanced = Module(
+            {
+                "name": "advanced-scheduler",
+                "priority": 500,
+                "provides": ["sched", "feasibility"],
+            }
+        )
+
+        db.add(sched_simple)
+        db.add(advanced)
+
+        # Set alternative to force sched-simple
+        db.set_alternative("sched", "sched-simple")
+        self.assertEqual(db.get("feasibility").name, "sched-simple")
+
+        # Calling add() again on the same task overwrites the priority bump
+        # This is the bug that add_active_task() had to work around
+        db.add(sched_simple)
+
+        # Priority bump was lost - advanced-scheduler wins again
+        self.assertEqual(db.get("feasibility").name, "advanced-scheduler")
+
 
 class MockContext:
     """Minimal mock context for DependencySolver tests"""

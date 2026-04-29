@@ -1300,6 +1300,57 @@ test_expect_success 'modprobe: FLUX_MODPROBE_DISABLE works in rc1' '
 		FLUX_RC_USE_MODPROBE=t \
 		    flux start flux module list | grep sched-simple
 '
+test_expect_success 'modprobe: rc3 with disabled high-priority alternatives' '
+	mkdir -p rc3-alt-test/modprobe.d &&
+	cat >rc3-alt-test/modprobe.d/alts.toml <<-EOF &&
+	[[modules]]
+	name = "default-module"
+	module = "sched-simple"
+	provides = ["test-service"]
+	after = ["job-manager"]
+	requires = ["job-manager"]
+
+	[[modules]]
+	name = "high-priority-alt"
+	module = "sched-simple"
+	priority = 500
+	provides = ["test-service"]
+	after = ["job-manager"]
+	requires = ["job-manager"]
+	EOF
+	FLUX_MODPROBE_PATH=$(pwd)/rc3-alt-test \
+	    FLUX_MODPROBE_DISABLE=high-priority-alt \
+		FLUX_RC_USE_MODPROBE=t \
+		    flux start --setattr=log-stderr-level=6 /bin/true \
+		    >rc3-alt.log 2>&1 &&
+	test_must_fail grep "high-priority-alt.*module not found" rc3-alt.log &&
+	test_must_fail grep "rc3 Exited (rc=1)" rc3-alt.log &&
+	test_must_fail grep "not properly shut down" rc3-alt.log
+'
+test_expect_success 'modprobe: needs-aware resolution prefers viable low-priority module' '
+	mkdir -p needs-test/modprobe.d &&
+	cat >needs-test/modprobe.d/alts.toml <<-EOF &&
+	[[modules]]
+	name = "simple-module"
+	module = "sched-simple"
+	provides = ["test-sched"]
+	priority = 50
+	after = ["job-manager"]
+	requires = ["job-manager"]
+
+	[[modules]]
+	name = "advanced-module"
+	module = "sched-simple"
+	provides = ["test-sched"]
+	priority = 500
+	needs = ["nonexistent-module"]
+	after = ["job-manager"]
+	requires = ["job-manager"]
+	EOF
+	FLUX_MODPROBE_PATH=$(pwd)/needs-test \
+		flux modprobe show test-sched >needs-test.json &&
+	cat needs-test.json | jq -e ".name == \"simple-module\""
+'
 test_expect_success 'modprobe: explicit load can load non-default module' '
 	FLUX_MODPROBE_PATH=$(pwd) \
 	    flux modprobe load --dry-run basic-scheduler >basic-load.out &&
@@ -1308,6 +1359,36 @@ test_expect_success 'modprobe: explicit load can load non-default module' '
 	load basic-scheduler
 	EOF
 	test_cmp basic-load.expected basic-load.out
+'
+test_expect_success 'modprobe: load can load disabled module' '
+	FLUX_MODPROBE_PATH=$(pwd) \
+	    FLUX_MODPROBE_DISABLE=basic-scheduler \
+	    flux modprobe load --dry-run basic-scheduler >disabled-load.out &&
+	test_debug cat disabled-load.out &&
+	cat <<-EOF >disabled-load.expected &&
+	load basic-scheduler
+	EOF
+	test_cmp disabled-load.expected disabled-load.out
+'
+test_expect_success 'modprobe: load can load disabled module via toml' '
+	cat <<-EOF >modprobe.d/002-disabled.toml &&
+	[[modules]]
+	name = "test-disabled-module"
+	disabled = true
+	ranks = "0"
+	provides = ["test-service"]
+	requires = ["job-manager", "another-disabled-module"]
+	[[modules]]
+	name = "another-disabled-module"
+	ranks = "0"
+	disabled = true
+	EOF
+	FLUX_MODPROBE_PATH=$(pwd) \
+	    flux modprobe load --dry-run test-disabled-module \
+	        >disabled-toml-load.out &&
+	test_debug "cat disabled-toml-load.out" &&
+	grep -q "load test-disabled-module" disabled-toml-load.out &&
+	grep -q "load another-disabled-module" disabled-toml-load.out
 '
 test_expect_success 'modprobe: --set-alternative detects bad input' '
 	( export FLUX_MODPROBE_PATH=$(pwd) &&
