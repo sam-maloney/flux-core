@@ -335,9 +335,10 @@ test_flux_security_version() {
     if test -z "$FLUX_SECURITY_VERSION"; then
         return 0
     fi
-    major=$(echo $FLUX_SECURITY_VERSION | cut -d. -f1)
-    minor=$(echo $FLUX_SECURITY_VERSION | cut -d. -f2)
-    patch=$(echo $FLUX_SECURITY_VERSION | cut -d. -f3)
+    ver=$(echo $FLUX_SECURITY_VERSION | sed 's/-.*//')
+    major=$(echo $ver | cut -d. -f1)
+    minor=$(echo $ver | cut -d. -f2)
+    patch=$(echo $ver | cut -d. -f3)
     test $major -ge $req_major -a $minor -ge $req_minor -a $patch -ge $req_patch
 }
 
