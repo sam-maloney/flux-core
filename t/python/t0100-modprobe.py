@@ -399,6 +399,114 @@ class TestTaskDB(unittest.TestCase):
         # Priority bump was lost - advanced-scheduler wins again
         self.assertEqual(db.get("feasibility").name, "advanced-scheduler")
 
+    def test_contains_operator(self):
+        """__contains__ enables 'in' operator for existence checks"""
+        db = TaskDB()
+        task = Task("kvs", provides=["kvs-service"])
+        db.add(task)
+
+        # Test 'in' operator for task name
+        self.assertTrue("kvs" in db)
+        self.assertFalse("nonexistent" in db)
+
+        # Test 'in' operator for provided services
+        self.assertTrue("kvs-service" in db)
+
+        # Test with disabled task (should still be 'in' the db)
+        task.disabled = True
+        self.assertTrue("kvs" in db)
+
+    def test_setitem_add_new_task(self):
+        """__setitem__ can add a new task"""
+        db = TaskDB()
+        task = Task("job-manager")
+
+        # Add via dict-like syntax
+        db["job-manager"] = task
+
+        # Verify it was added
+        self.assertTrue("job-manager" in db)
+        self.assertIs(db.get("job-manager"), task)
+
+    def test_setitem_update_existing_task(self):
+        """__setitem__ can update an existing task"""
+        db = TaskDB()
+        task = Task("sched", priority=100)
+        db.add(task)
+
+        # Update the task
+        task.priority = 200
+        db["sched"] = task
+
+        # Verify update worked
+        retrieved = db.get("sched")
+        self.assertEqual(retrieved.priority, 200)
+        self.assertIs(retrieved, task)
+
+    def test_setitem_with_provides(self):
+        """__setitem__ works with tasks that provide services"""
+        from flux.modprobe import Module
+
+        db = TaskDB()
+        module = Module({"name": "sched-simple", "provides": ["sched", "feasibility"]})
+
+        # Add via setitem
+        db["sched-simple"] = module
+
+        # Verify accessible via all names
+        self.assertTrue("sched-simple" in db)
+        self.assertTrue("sched" in db)
+        self.assertTrue("feasibility" in db)
+        self.assertIs(db.get("sched"), module)
+
+    def test_setitem_validates_key_matches_name(self):
+        """__setitem__ raises ValueError if key doesn't match task.name"""
+        db = TaskDB()
+        task = Task("kvs")
+
+        # Should raise if key doesn't match
+        with self.assertRaises(ValueError) as ctx:
+            db["wrong-name"] = task
+
+        self.assertIn("doesn't match task.name", str(ctx.exception))
+        self.assertIn("wrong-name", str(ctx.exception))
+        self.assertIn("kvs", str(ctx.exception))
+
+    def test_setitem_preserves_priority_bump(self):
+        """__setitem__ works correctly with priority bumps from set_alternative"""
+        from flux.modprobe import Module
+
+        db = TaskDB()
+        low = Module({"name": "low", "provides": ["service"], "priority": 50})
+        high = Module({"name": "high", "provides": ["service"], "priority": 500})
+
+        db.add(low)
+        db.add(high)
+
+        # High priority wins initially
+        self.assertEqual(db.get("service").name, "high")
+
+        # Set alternative to boost low priority
+        db.set_alternative("service", "low")
+        self.assertEqual(db.get("service").name, "low")
+
+        # Use setitem to update low (e.g., change some attribute)
+        low.disabled = False  # Dummy change
+        db["low"] = low
+
+        # Priority bump should be preserved (low still wins)
+        self.assertEqual(db.get("service").name, "low")
+
+    def test_has_method_still_works(self):
+        """has() method still works for backward compatibility"""
+        db = TaskDB()
+        task = Task("test")
+        db.add(task)
+
+        # Old API should still work
+        self.assertTrue(db.has("test"))
+        self.assertFalse(db.has("nonexistent"))
+
 
 class MockContext:
     """Minimal mock context for DependencySolver tests"""
