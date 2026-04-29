@@ -799,6 +799,127 @@ class DependencySolver:
         return result
 
 
+class ConfigLoader:
+    """
+    Handles configuration and RC file loading for modprobe.
+
+    This class encapsulates the logic for:
+    - Building searchpaths from environment variables and config
+    - Locating TOML configuration files
+    - Locating Python RC script files
+    - Expanding .d directories in the searchpath
+
+    Separated from Modprobe class for clarity and testability.
+    """
+
+    def __init__(self, searchpath, print_func):
+        """
+        Initialize configuration loader.
+
+        Args:
+            searchpath: Dict of {"toml": [paths...], "py": [paths...]}
+            print_func: Function to call for debug output
+        """
+        self.searchpath = searchpath
+        self.print = print_func
+
+    def get_toml_files(self):
+        """
+        Return all modprobe config toml files found in the following order:
+         - Always read ``{fluxdatadir}/modprobe/modprobe.toml``
+         - for dir in self.searchpath: read ``{dir}/modprobe.d/*.toml``
+
+        Returns:
+            List of absolute paths to TOML files
+        """
+        files = []
+        builtin_toml_config = (
+            Path(conf_builtin_get("datadir")) / "modprobe" / "modprobe.toml"
+        )
+        self.print(f"checking {builtin_toml_config}")
+        if builtin_toml_config.exists():
+            files.append(str(builtin_toml_config))
+        files.extend(self._searchpath_expand())
+        return files
+
+    def get_rc_files(self, name="rc1"):
+        """
+        Return all modprobe rc *.py files found in the following order:
+         - Always read ``{fluxdatadir}/modprobe/{name}.py`` (e.g. ``rc1.py``)
+         - for dir in self.searchpath: read ``{dir}/{name}.d/*.py``
+
+        Args:
+            name: RC file basename (e.g., "rc1", "rc3")
+
+        Returns:
+            List of absolute paths to Python RC files
+        """
+        files = []
+        builtin_rc_file = (
+            Path(conf_builtin_get("libexecdir")) / "modprobe" / f"{name}.py"
+        )
+        self.print(f"checking {builtin_rc_file}")
+        if builtin_rc_file.exists():
+            files.append(str(builtin_rc_file))
+        files.extend(self._searchpath_expand(name=name, ext="py"))
+        return files
+
+    def _searchpath_expand(self, name="modprobe", ext="toml"):
+        """
+        Expand searchpath for extension ``ext`` based on configured paths.
+
+        Args:
+            name: Base name for .d directory (e.g., "modprobe", "rc1")
+            ext: File extension to search for (e.g., "toml", "py")
+
+        Returns:
+            List of absolute paths to files found
+        """
+        files = []
+        for directory in self.searchpath[ext]:
+            self.print(f"checking {directory}/{name}.d/*.{ext}")
+            if Path(directory).exists():
+                files.extend(sorted(glob.glob(f"{directory}/{name}.d/*.{ext}")))
+        return files
+
+    @staticmethod
+    def build_searchpath(builtindir="datadir"):
+        """
+        Build searchpath list from environment variables and config.
+
+        Returns list of dirs in ``FLUX_MODPROBE_PATH`` if set, otherwise
+        returns the default modprobe search path.
+
+        Args:
+            builtindir: base path for builtin/package path. Should
+                be either "datadir" or "libexecdir".
+
+        Returns:
+            List of directory paths (duplicates removed)
+        """
+        searchpath = []
+        if "FLUX_MODPROBE_PATH" in os.environ:
+            searchpath = filter(
+                lambda s: s and not s.isspace(),
+                os.environ["FLUX_MODPROBE_PATH"].split(":"),
+            )
+        else:
+            pkgdir = conf_builtin_get(builtindir)
+            confdir = conf_builtin_get("confdir")
+            searchpath = [f"{pkgdir}/modprobe", f"{confdir}/modprobe"]
+
+        if "FLUX_MODPROBE_PATH_APPEND" in os.environ:
+            searchpath.extend(
+                filter(
+                    lambda s: s and not s.isspace(),
+                    os.environ["FLUX_MODPROBE_PATH_APPEND"].split(":"),
+                )
+            )
+
+        # return searchpath without duplicates
+        return list(OrderedDict.fromkeys(searchpath))
+
+
 # ==============================================================================
 # SECTION 3: Task Definitions
 # ==============================================================================
@@ -1334,10 +1455,13 @@ class Modprobe:
         # Initialize dependency solver
         self.solver = DependencySolver(self.taskdb, self.context)
 
-        self.searchpath = {
-            "toml": self._get_searchpath(),
-            "py": self._get_searchpath(builtindir="libexecdir"),
+        # Initialize configuration loader
+        searchpath = {
+            "toml": ConfigLoader.build_searchpath(),
+            "py": ConfigLoader.build_searchpath(builtindir="libexecdir"),
         }
+        self.loader = ConfigLoader(searchpath, self.print)
+        self.searchpath = searchpath  # Keep for backward compatibility
 
         # Active tasks are those added via the @task decorator, and
         # which will be active by default when running "all" tasks:
@@ -1468,79 +1592,6 @@ class Modprobe:
                 # Allow <module>.key to update an existing configured module:
                 self.update_module(name, entry)
 
-    def _get_searchpath(self, builtindir="datadir"):
-        """
-        Return list of dirs in ``FLUX_MODPROBE_PATH`` if set, o/w returns the
-        default modprobe search path.
-        Args:
-            builtindir (str): base path for builtin/package path. Should
-                be either "datadir" or "libexecdir".
-        """
-        searchpath = []
-        if "FLUX_MODPROBE_PATH" in os.environ:
-            searchpath = filter(
-                lambda s: s and not s.isspace(),
-                os.environ["FLUX_MODPROBE_PATH"].split(":"),
-            )
-        else:
-            pkgdir = conf_builtin_get(builtindir)
-            confdir = conf_builtin_get("confdir")
-            searchpath = [f"{pkgdir}/modprobe", f"{confdir}/modprobe"]
-
-        if "FLUX_MODPROBE_PATH_APPEND" in os.environ:
-            searchpath.extend(
-                filter(
-                    lambda s: s and not s.isspace(),
-                    os.environ["FLUX_MODPROBE_PATH_APPEND"].split(":"),
-                )
-            )
-
-        # return searchpath without duplicates
-        return list(OrderedDict.fromkeys(searchpath))
-
-    def _searchpath_expand(self, name="modprobe", ext="toml"):
-        """
-        Expand searchpath for extension ``ext`` based on configured paths.
-        """
-        files = []
-        for directory in self.searchpath[ext]:
-            self.print(f"checking {directory}/{name}.d/*.{ext}")
-            if Path(directory).exists():
-                files.extend(sorted(glob.glob(f"{directory}/{name}.d/*.{ext}")))
-        return files
-
-    def _get_toml_files(self):
-        """
-        Return all modprobe config toml files found in the following order
-         - Always read ``{fluxdatadir}/modprobe/modprobe.toml``
-         - for dir in self.searchpath: read ``{dir}/modprobe.d/*.toml``
-        """
-        files = []
-        builtin_toml_config = (
-            Path(conf_builtin_get("datadir")) / "modprobe" / "modprobe.toml"
-        )
-        self.print(f"checking {builtin_toml_config}")
-        if builtin_toml_config.exists():
-            files.append(str(builtin_toml_config))
-        files.extend(self._searchpath_expand())
-        return files
-
-    def _get_rc_files(self, name="rc1"):
-        """
-        Return all modprobe rc *.py files found in the following order
-         - Always read ``{fluxdatadir}/modprobe/{name}.py`` (e.g. ``rc1.py``)
-         - for dir in self.searchpath: read ``{dir}/{name}.d/*.py``
-        """
-        files = []
-        builtin_rc_file = (
-            Path(conf_builtin_get("libexecdir")) / "modprobe" / f"{name}.py"
-        )
-        self.print(f"checking {builtin_rc_file}")
-        if builtin_rc_file.exists():
-            files.append(str(builtin_rc_file))
-        files.extend(self._searchpath_expand(name=name, ext="py"))
-        return files
-
     def _update_modules_from_config(self):
         """Update modules using broker config
         Process a [modules] table in config support the following keys:
@@ -1562,7 +1613,7 @@ class Modprobe:
         """
         Load module configuration from TOML config.
         """
-        for file in self._get_toml_files():
+        for file in self.loader.get_toml_files():
             self.print(f"loading {file}")
             self.add_modules(file)
 
@@ -1700,7 +1751,7 @@ class Modprobe:
             return
 
         # O/w, load all rc files in configured search path:
-        for file in self._get_rc_files(name):
+        for file in self.loader.get_rc_files(name):
             self.print(f"loading {file}")
             self._load_file(file)
 
