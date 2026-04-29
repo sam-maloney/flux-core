@@ -262,51 +262,6 @@ class TaskDB:
             raise ValueError(f"task {task_name} does not provide {service}")
         return self._services[service][task_name]
 
-    def update(self, task: "Task") -> None:
-        """
-        Update an existing task in the database, or add it if not found.
-
-        Updates the task object in place, preserving the original insertion
-        order. Handles updates to priority, provides list, and other attributes.
-
-        WARNING: If the task does not exist, it will be added automatically.
-        Use has() first if you need strict update-only semantics.
-
-        Args:
-            task: Task object to update (identified by task.name)
-        """
-        # First check if task exists in any service
-        found = False
-        for service in self._services:
-            if task.name in self._services[service]:
-                found = True
-                break
-
-        if not found:
-            # Task doesn't exist yet, add it
-            self.add(task)
-            return
-
-        # Update all services where this task should appear
-        for service in (task.name, *task.provides):
-            if service in self._services and task.name in self._services[service]:
-                old_entry = self._services[service][task.name]
-                # Preserve insertion order but update priority and task
-                self._services[service][task.name] = self.TaskEntry(
-                    task.priority,
-                    old_entry.index,
-                    task,
-                )
-            else:
-                # New service added to provides, add entry with preserved index
-                # Get the insertion index from any existing service
-                for existing_service in self._services:
-                    if task.name in self._services[existing_service]:
-                        index = self._services[existing_service][task.name].index
-                        entry = self.TaskEntry(task.priority, index, task)
-                        self._services[service][task.name] = entry
-                        break
-
     def set_alternative(self, service: str, name: str, propagate: bool = True) -> None:
         """Select a specific alternative 'name' for service"""
         if service not in self._services:
@@ -348,15 +303,6 @@ class TaskDB:
         for entry in self._services[service].values():
             entry.task.force_enabled = True
 
-    def has(self, service: str) -> bool:
-        """
-        Check if a task/module/service exists in the database.
-
-        More efficient than calling get() and catching ValueError.
-        Prefer using 'in' operator which calls __contains__.
-        """
-        return service in self._services and len(self._services[service]) > 0
-
     def __contains__(self, service: str) -> bool:
         """
         Check if service exists in database (enables 'in' operator).
@@ -365,7 +311,7 @@ class TaskDB:
             if "kvs" in taskdb:
                 task = taskdb.get("kvs")
         """
-        return self.has(service)
+        return service in self._services and len(self._services[service]) > 0
 
     def __setitem__(self, name: str, task: "Task") -> None:
         """

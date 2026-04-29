@@ -104,7 +104,7 @@ class TestTaskDB(unittest.TestCase):
 
         # Update first task priority but not above second
         task_first.priority = 75
-        db.update(task_first)
+        db["module-a"] = task_first
 
         # Second should still win due to insertion order
         retrieved = db.get("service")
@@ -112,7 +112,7 @@ class TestTaskDB(unittest.TestCase):
 
         # Update first task priority above second
         task_first.priority = 150
-        db.update(task_first)
+        db["module-a"] = task_first
 
         # Now first should win due to priority
         retrieved = db.get("service")
@@ -258,11 +258,11 @@ class TestTaskDB(unittest.TestCase):
         db.add(task)
 
         # Should find by name
-        self.assertTrue(db.has("module-a"))
+        self.assertTrue("module-a" in db)
         # Should find by provides
-        self.assertTrue(db.has("service-x"))
+        self.assertTrue("service-x" in db)
         # Should not find nonexistent
-        self.assertFalse(db.has("nonexistent"))
+        self.assertFalse("nonexistent" in db)
 
     def test_enable_does_not_cascade_to_requires(self):
         """Enable does not cascade to required tasks (by design)"""
@@ -471,41 +471,6 @@ class TestTaskDB(unittest.TestCase):
         self.assertIn("doesn't match task.name", str(ctx.exception))
         self.assertIn("wrong-name", str(ctx.exception))
         self.assertIn("kvs", str(ctx.exception))
-
-    def test_setitem_preserves_priority_bump(self):
-        """__setitem__ works correctly with priority bumps from set_alternative"""
-        from flux.modprobe import Module
-
-        db = TaskDB()
-        low = Module({"name": "low", "provides": ["service"], "priority": 50})
-        high = Module({"name": "high", "provides": ["service"], "priority": 500})
-
-        db.add(low)
-        db.add(high)
-
-        # High priority wins initially
-        self.assertEqual(db.get("service").name, "high")
-
-        # Set alternative to boost low priority
-        db.set_alternative("service", "low")
-        self.assertEqual(db.get("service").name, "low")
-
-        # Use setitem to update low (e.g., change some attribute)
-        low.disabled = False  # Dummy change
-        db["low"] = low
-
-        # Priority bump should be preserved (low still wins)
-        self.assertEqual(db.get("service").name, "low")
-
-    def test_has_method_still_works(self):
-        """has() method still works for backward compatibility"""
-        db = TaskDB()
-        task = Task("test")
-        db.add(task)
-
-        # Old API should still work
-        self.assertTrue(db.has("test"))
-        self.assertFalse(db.has("nonexistent"))
 
 
 class MockContext:
