@@ -118,10 +118,12 @@ For each job start request, sdexec-mapper:
 4. Returns the complete property dict to sdexec for inclusion in the
    StartTransientUnit D-Bus call
 
-Properties from ``exec.sdexec-properties`` configuration are merged with mapper
-output, with mapper values taking precedence. This allows custom mappers to
-override configured properties based on job resources (e.g., setting
-``MemoryMax`` proportional to allocated cores).
+The mapper receives ``exec.sdexec-properties`` as additional context.
+The default ``HwlocMapper`` uses this to scale memory cap properties
+(``MemoryHigh``, ``MemoryMax``, ``MemorySwapMax``) proportional to the
+job's processing unit allocation; custom mappers may use it for
+site-specific adjustments.  Mapper-generated properties take precedence
+over ``sdexec-properties`` values.
 
 The default HwlocMapper implementation:
 
@@ -129,6 +131,10 @@ The default HwlocMapper implementation:
   NUMA nodes
 - Discovers GPU device nodes via sysfs based on PCI addresses from hwloc
 - Sets DevicePolicy=closed to enforce device containment
+- Scales memory cap properties (``MemoryHigh``, ``MemoryMax``,
+  ``MemorySwapMax``) from ``exec.sdexec-properties`` by the ratio of
+  allocated to total processing units, so jobs sharing a node each receive
+  a proportional memory limit
 
 Property Generation
 ===================
@@ -165,12 +171,7 @@ The mapper module provides runtime statistics via ``flux module stats sdexec-map
        "mapper_class": "flux.sdexec.map.HwlocMapper",
        "mapper_searchpath": ""
      },
-     "requests": 42,
-     "map_time_ms": {
-       "mean": 1.2,
-       "min": 0.8,
-       "max": 3.5
-     }
+     "requests": 42
    }
 
 Configuration

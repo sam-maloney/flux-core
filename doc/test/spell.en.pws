@@ -1182,6 +1182,7 @@ ini
 AccountingMapper
 CPUAccounting
 CustomMapper
+PerCoreMemoryMapper
 deduplicated
 gb
 MemoryAccounting
