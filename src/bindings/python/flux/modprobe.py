@@ -8,6 +8,92 @@
 # SPDX-License-Identifier: LGPL-3.0
 ##############################################################
 
+"""
+Flux modprobe: Task and module orchestration for broker startup/shutdown.
+
+This module implements the Flux modprobe system, which manages broker
+module loading/unloading and task execution during rc1 (startup) and
+rc3 (shutdown). It provides declarative configuration through TOML files
+and Python rc scripts with dependency resolution and precedence ordering.
+
+Architecture
+============
+
+The implementation is organized into several key components:
+
+**TaskDB**: Priority-based task database supporting service alternatives.
+  Stores tasks in a dict-of-dicts structure {service: {name: TaskEntry}}
+  where TaskEntry is a namedtuple(index, task). Priority comes from
+  task.priority. When selecting a task for a service, the highest priority
+  enabled task is chosen.
+
+**DependencySolver**: Dependency resolution engine.
+  Handles recursive requirement resolution (requires), needs filtering,
+  execution order precedence (before/after), and safe module removal.
+
+**ConfigLoader**: Configuration and rc file loading.
+  Manages search paths and loads TOML module config and Python rc files
+  from configurable directories.
+
+**Task**: Base class for modprobe tasks.
+  Represents a task with configuration including ranks, dependencies,
+  and enabled/disabled state. A task can be load/remove of a module (the
+  Module class) or a Python function (CodeTask class: Python function
+  decorated with @task).
+
+**Context**: Execution context passed to all tasks.
+  Provides access to broker configuration, attributes, environment
+  variables, shared data between tasks, and module argument management.
+  Uses thread-local storage to provide an automatic per-thread Flux handle.
+
+**Modprobe**: Main orchestrator class.
+  Coordinates TaskDB, DependencySolver, and ConfigLoader. Provides
+  high-level operations: configure_modules(), load(), remove(), run(),
+  read_rcfile(). Used by flux-modprobe(1) command.
+
+Usage Example
+=============
+
+Creating tasks in rc1.py::
+
+    from flux.modprobe import task
+
+    @task("setup-kvs", ranks="0", after=["kvs"], needs=["kvs"])
+    def setup_kvs(context):
+        # Configure KVS after it loads
+        context.print("Configuring KVS")
+        # ... setup code ...
+
+Using Modprobe programmatically::
+
+    from flux.modprobe import Modprobe
+
+    M = Modprobe(verbose=True)
+    M.configure_modules()
+    M.load(["kvs", "job-manager"])
+    M.run(M.get_deps(["kvs", "job-manager"]))
+
+Configuration
+=============
+
+Module configuration in modprobe.toml::
+
+    [[modules]]
+    name = "kvs"
+    ranks = "all"
+    provides = ["kvs-service"]
+    requires = []
+    after = []
+
+    [[modules]]
+    name = "job-manager"
+    ranks = "0"
+    requires = ["kvs"]
+    after = ["kvs"]
+
+See flux-modprobe(1) for complete configuration documentation.
+"""
+
 import concurrent
 import glob
 import os
@@ -814,15 +900,26 @@ class DependencySolver:
 
 class ConfigLoader:
     """
-    Handles configuration and RC file loading for modprobe.
+    Configuration and rc file loading with search path management.
 
-    This class encapsulates the logic for:
-    - Building searchpaths from environment variables and config
-    - Locating TOML configuration files
-    - Locating Python RC script files
-    - Expanding .d directories in the searchpath
+    ConfigLoader handles all file I/O for modprobe configuration,
+    separating I/O concerns from business logic. It manages search paths
+    for both TOML module config files and Python rc scripts.
 
-    Separated from Modprobe class for clarity and testability.
+    Search Path:
+        Default search path is built from:
+        - Built-in: $datadir/modprobe or $libexecdir/modprobe
+        - FLUX_MODPROBE_PATH (replaces default)
+        - FLUX_MODPROBE_PATH_PREPEND (added before default)
+        - FLUX_MODPROBE_PATH_APPEND (added after default)
+
+    File Discovery:
+        TOML: modprobe.toml and modprobe.d/*.toml
+        RC:   rc1.py, rc1.d/*.py (or rc3.py, rc3.d/*.py)
+
+    Attributes:
+        searchpath (dict): Paths for 'toml' and 'py' file types
+        print (callable): Function for verbose output
     """
 
     def __init__(self, searchpath, print_func):
@@ -940,7 +1037,47 @@ class ConfigLoader:
 
 class Task:
     """
-    Class representing a modprobe task and associated configuration
+    Base class representing a modprobe task and its configuration.
+
+    A Task represents a unit of work in the modprobe system with
+    associated configuration controlling when and where it runs. Tasks
+    can be broker modules (Module subclass) or Python functions
+    (CodeTask subclass).
+
+    Configuration Attributes:
+        name (str): Unique task identifier
+        ranks (RankConditional|RankIDset): Ranks where task executes
+        provides (list): Service names this task provides (alternatives)
+        requires (list): Tasks/services that must be active when this runs
+        needs (list): Tasks/services that must be enabled for this to
+            enable
+        before (list): Tasks/services this must run before
+        after (list): Tasks/services this must run after
+        needs_attrs (list): Required broker attributes
+        needs_config (list): Required config keys
+        needs_env (list): Required environment variables
+        disabled (bool): Whether task is explicitly disabled
+        priority (int): Priority for service alternative selection
+            (default 100)
+
+    Special Values:
+        - before=["*"]: Run before all other tasks (cannot also use after)
+        - after=["*"]: Run after all other tasks (cannot also use before)
+        - Specs starting with "!" are inverted (must NOT be set)
+
+    Runtime Attributes:
+        starttime (float): Task start timestamp (set during execution)
+        endtime (float): Task end timestamp (set during execution)
+        force_enabled (bool): Override disabled state (internal use)
+
+    Enabling Logic:
+        A task is enabled if ALL of the following are true:
+        1. Not explicitly disabled via disabled=True
+        2. Runs on the current broker rank
+        3. All needs_config keys are set (or not set if prefixed with !)
+        4. All needs_attrs attributes are set (or not set if !)
+        5. All needs_env variables are set (or not set if !)
+        6. All tasks in needs list are also enabled
     """
 
     VALID_ARGS = {
@@ -1245,9 +1382,35 @@ def task(name, **kwargs):
 
 class Context:
     """
-    Context object passed to all modprobe tasks.
-    Allows the passage of data between tasks, simple access to broker
-    configuration and attributes, addition of module arguments, etc.
+    Execution context passed to all modprobe tasks.
+
+    Context provides task functions with access to broker state,
+    configuration, and shared data. It enables tasks to query and modify
+    the environment, communicate with the broker, and share data with
+    other tasks.
+
+    Key Features:
+        - Broker access: Configuration, attributes, RPCs via Flux handle
+        - Environment: Get/set variables in current process and broker
+        - Shared data: Store/retrieve arbitrary data between tasks
+        - Module arguments: Configure module load-time arguments
+        - Thread safety: Per-thread Flux handles via thread-local storage
+
+    Common Methods:
+        handle: Flux handle for broker communication (thread-local)
+        rank: Current broker rank
+        conf_get(key): Get broker config value
+        attr_get(attr): Get broker attribute
+        getenv(var): Get environment variable (local or broker)
+        setenv(name, value): Set environment variable (local and broker)
+        set(key, value) / get(key): Store/retrieve shared data
+        setopt(module, options): Configure module arguments
+        rpc(topic, args): Send RPC to broker
+
+    Attributes:
+        verbose (bool): Verbose output mode
+        dry_run (bool): Dry-run mode (print without executing)
+        modprobe (Modprobe): Parent Modprobe instance
     """
 
     tls = threading.local()
@@ -1310,7 +1473,22 @@ class Context:
         return self._broker_env_cache[var]
 
     def getenv(self, var, default=None):
-        """Get env var value locally or from local broker"""
+        """
+        Get environment variable value from local process or broker.
+
+        Checks the local process environment first, then falls back to
+        querying the broker via RPC. This is useful because the broker
+        may filter some variables from rc1/rc3 environments (e.g., those
+        set by resource managers or launchers). Results from broker are
+        cached.
+
+        Args:
+            var: Environment variable name
+            default: Value to return if variable is not set
+
+        Returns:
+            Variable value (str) or default if not set
+        """
         value = os.environ.get(var)
         if value is None:
             value = self._broker_getenv(var)
@@ -1365,8 +1543,19 @@ class Context:
 
     def setopt(self, module, options, overwrite=False):
         """
-        Append option to module opts. ``option`` may contain multiple options
-        separated by whitespace.
+        Add module load-time arguments.
+
+        Appends options to a module's argument list (or overwrites if
+        overwrite=True). Options can be a single string with
+        whitespace-separated arguments.
+
+        Args:
+            module: Module name
+            options: Options string (whitespace-separated)
+            overwrite: Replace all existing options (default False)
+
+        Example:
+            context.setopt("kvs", "checkpoint-period=10m")
         """
         if overwrite:
             self.module_args_overwrite[module] = True
@@ -1374,8 +1563,19 @@ class Context:
         self.module_args[module].extend(options.split())
 
     def getopts(self, name, default=None, also=None):
-        """Get module opts for module 'name'
-        If also is provided, append any module options for those names as well
+        """
+        Get module load-time arguments.
+
+        Retrieves the argument list for a module, optionally including
+        arguments from related modules.
+
+        Args:
+            name: Module name
+            default: Default arguments (used if no overwrite occurred)
+            also: List of additional module names whose args to include
+
+        Returns:
+            List of argument strings
         """
         lst = [name]
         if also is not None:
@@ -1388,7 +1588,15 @@ class Context:
         return result
 
     def bash(self, command):
-        """Execute command under ``bash -c``"""
+        """
+        Execute shell command via bash -c.
+
+        Args:
+            command: Shell command string
+
+        Raises:
+            RuntimeError: If command exits non-zero or is killed by signal
+        """
         process = subprocess.run(["bash", "-c", command])
         if process.returncode != 0:
             if process.returncode > 0:
@@ -1399,7 +1607,15 @@ class Context:
                 raise RuntimeError(f"bash: died by signal {process.returncode}")
 
     def load_modules(self, modules):
-        """Set a list of modules to load by name"""
+        """
+        Schedule modules to be loaded during task execution.
+
+        Adds modules to the active task list so they will be loaded when
+        run() is called. Typically used in setup() functions.
+
+        Args:
+            modules: List of module names to load
+        """
         self.modprobe.activate_modules(modules)
 
     def remove_modules(self, modules=None):
@@ -1451,7 +1667,34 @@ class ModuleList:
 
 class Modprobe:
     """
-    The modprobe main class. Intended for use by flux-modprobe(1).
+    Main orchestrator for flux-modprobe task and module management.
+
+    Modprobe coordinates TaskDB, DependencySolver, and ConfigLoader to
+    provide high-level operations for module loading/unloading and task
+    execution. Used by flux-modprobe(1) command and available for
+    programmatic use.
+
+    Key Operations:
+        configure_modules(): Load module config from TOML files
+        load(modules): Load modules and their dependencies
+        remove(modules): Unload modules and unused dependencies
+        read_rcfile(name): Load and execute rc Python scripts
+        run(deps): Execute tasks in dependency order
+
+    Attributes:
+        taskdb (TaskDB): Task database
+        context (Context): Execution context
+        solver (DependencySolver): Dependency resolver
+        loader (ConfigLoader): Configuration loader
+        handle (Flux): Flux handle (from context)
+        rank (int): Broker rank
+        exitcode (int): Exit code (0=success, 1=failure)
+        timing (list): Optional timing data for performance analysis
+
+    Args:
+        timing (bool): Enable timing instrumentation (default False)
+        verbose (bool): Enable verbose output (default False)
+        dry_run (bool): Print actions without executing (default False)
     """
 
     def __init__(self, timing=False, verbose=False, dry_run=False):
@@ -1531,8 +1774,7 @@ class Modprobe:
 
     def add_active_task(self, task):
         """Add a task to the task db and active tasks list"""
-        # Only add to taskdb if it doesn't exist yet (to preserve priority
-        # bumps from set_alternative() calls)
+        # Only add to taskdb if it doesn't exist yet (avoids duplicate entries)
         if not self.has_task(task.name):
             self.add_task(task)
         self._active_tasks.append(task.name)
@@ -1640,7 +1882,15 @@ class Modprobe:
 
     def configure_modules(self):
         """
-        Load module configuration from TOML config.
+        Load module configuration from TOML config files.
+
+        Reads all modprobe.toml and modprobe.d/*.toml files from the
+        search path, adding module definitions to the task database.
+        Also applies any module configuration overrides from broker
+        config.
+
+        Returns:
+            self: For method chaining
         """
         for file in self.loader.get_toml_files():
             self.print(f"loading {file}")
@@ -1683,6 +1933,17 @@ class Modprobe:
         return result
 
     def solve(self, tasks, timing=True, ignore_disabled=False):
+        """
+        Recursively resolve all requirements for the given tasks.
+
+        Args:
+            tasks: Iterable of task/module names
+            timing: Record timing data (default True)
+            ignore_disabled: Include disabled tasks (default False)
+
+        Returns:
+            List of task names including all recursive requirements
+        """
         t0 = self.timestamp
         result = self.solver.solve_requirements(tasks, ignore_disabled=ignore_disabled)
         if timing:
@@ -1696,7 +1957,20 @@ class Modprobe:
         return self.solver._process_before(tasks, deps)
 
     def get_deps(self, tasks):
-        """Return dependencies for tasks as dict of names to predecessor list"""
+        """
+        Build execution order precedence graph for tasks.
+
+        Constructs a dict mapping task names to lists of predecessors
+        (tasks that must complete before each task can start). Respects
+        before/after constraints and handles special before=["*"] and
+        after=["*"] cases.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict of {task_name: [predecessor_list]} for topological sort
+        """
         t0 = self.timestamp
         deps = self.solver.solve_execution_order(tasks)
         self.add_timing("deps", t0)
@@ -1709,7 +1983,16 @@ class Modprobe:
         return self.solver.get_requires(tasks)
 
     def run(self, deps):
-        """Run all tasks in deps in precedence order"""
+        """
+        Execute tasks in parallel respecting precedence constraints.
+
+        Uses ThreadPoolExecutor to run tasks concurrently when their
+        dependencies are satisfied. Tasks are executed in topological
+        order based on the deps precedence graph.
+
+        Args:
+            deps: Dict of {task_name: [predecessors]} from get_deps()
+        """
         t0 = self.timestamp
         sorter = TopologicalSorter(deps)
         sorter.prepare()
@@ -1773,6 +2056,17 @@ class Modprobe:
             setup(self.context)
 
     def read_rcfile(self, name):
+        """
+        Load and execute Python rc files.
+
+        Loads rc Python files from search path (e.g., rc1.py, rc1.d/*.py)
+        and registers @task-decorated functions. Also executes setup()
+        function if present in any loaded module.
+
+        Args:
+            name: RC file basename (e.g., "rc1", "rc3") or absolute path
+                to a .py file
+        """
         # For absolute file path, just add tasks from single file:
         if name.endswith(".py"):
             self.print(f"loading {name}")
@@ -1907,7 +2201,20 @@ class Modprobe:
             self.add_active_task(task)
 
     def remove(self, modules):
-        """Remove loaded modules"""
+        """
+        Unload modules and any unused dependencies.
+
+        Finds all modules that can be safely removed (no remaining
+        dependents) and unloads them in reverse load order.
+
+        Args:
+            modules: List of module names to remove, or ["all"] to remove
+                all loaded modules
+
+        Raises:
+            ValueError: If a specified module is not loaded or still has
+                active dependents
+        """
         tasks, deps = self._solve_modules_remove(modules)
         [self.get_task(x).set_remove() for x in deps.keys()]
         self.run(deps)

@@ -251,6 +251,11 @@ Each entry in the ``modules`` array supports the following keys:
    ``>`` or ``<`` followed by a single integer. (for example, ``">0"`` to
    load a module all ranks but rank 0.)
 
+**disabled**
+   (optional, boolean) If true, disable this module/task so it will not be
+   loaded during normal startup. Disabled modules can still be loaded
+   explicitly via :command:`flux modprobe load`. Default: false.
+
 **requires**
    (optional, array of string) An array of services this module requires. That
    is, if this module is loaded, the services in *requires* will also be
