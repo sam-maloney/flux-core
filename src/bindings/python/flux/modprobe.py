@@ -353,8 +353,73 @@ class TaskDB:
         Check if a task/module/service exists in the database.
 
         More efficient than calling get() and catching ValueError.
+        Prefer using 'in' operator which calls __contains__.
         """
         return service in self._services and len(self._services[service]) > 0
+
+    def __contains__(self, service: str) -> bool:
+        """
+        Check if service exists in database (enables 'in' operator).
+
+        Example:
+            if "kvs" in taskdb:
+                task = taskdb.get("kvs")
+        """
+        return self.has(service)
+
+    def __setitem__(self, name: str, task: "Task") -> None:
+        """
+        Add or update task in database (enables dict-like assignment).
+
+        Always succeeds - adds task if new, updates if exists. This is the
+        idiomatic Python way to handle upsert operations, similar to dict.
+
+        Example:
+            taskdb["kvs"] = kvs_task  # Add or update
+
+        Args:
+            name: Task name (must match task.name)
+            task: Task object to add/update
+
+        Raises:
+            ValueError: If name doesn't match task.name
+        """
+        # TaskDB invariant is that tasks are stored first under task.name.
+        # Ensure that's not violated here:
+        if name != task.name:
+            raise ValueError(f"Key '{name}' doesn't match task.name '{task.name}'")
+
+        # Check if task exists in any service
+        found = False
+        for service in self._services:
+            if task.name in self._services[service]:
+                found = True
+                break
+
+        if not found:
+            # Task doesn't exist yet, add it
+            self.add(task)
+            return
+
+        # Update all services where this task should appear
+        for service in (task.name, *task.provides):
+            if service in self._services and task.name in self._services[service]:
+                old_entry = self._services[service][task.name]
+                # Use task.priority directly (dict-like semantics: replacement)
+                self._services[service][task.name] = self.TaskEntry(
+                    task.priority,
+                    old_entry.index,
+                    task,
+                )
+            else:
+                # New service added to provides, add entry with preserved index
+                # Get the insertion index from any existing service
+                for existing_service in self._services:
+                    if task.name in self._services[existing_service]:
+                        old_entry = self._services[existing_service][task.name]
+                        entry = self.TaskEntry(task.priority, old_entry.index, task)
+                        self._services[service][task.name] = entry
+                        break
 
     def has_enabled_provider(self, tasks, service: str) -> bool:
         """
@@ -782,18 +847,16 @@ class DependencySolver:
         for name in result:
             remaining = dependents.get(name, set()) - removed_items
             # Also filter out by real task name in case of aliases
-            try:
-                self.taskdb.get(name)  # Verify task exists
+            if name in self.taskdb:
                 remaining = {
                     dep
                     for dep in remaining
                     if dep not in removed_items
+                    and dep in self.taskdb
                     and self.taskdb.get(dep).name not in removed_items
                 }
-            except ValueError:
-                # Task doesn't exist in taskdb (e.g., nonexistent module)
-                # Just use the remaining set as-is
-                pass
+            # else: Task doesn't exist in taskdb (e.g., nonexistent module)
+            # Just use the remaining set as-is
             if remaining:
                 raise ValueError(
                     f"{name} still in use by " + ", ".join(sorted(remaining))
@@ -1556,11 +1619,7 @@ class Modprobe:
 
     def has_task(self, name):
         """Return True if task exists in taskdb"""
-        try:
-            self.taskdb.get(name)
-            return True
-        except ValueError:
-            return False
+        return name in self.taskdb
 
     def update_module(self, name, entry, new_module=None):
         task = self.get_task(name)
@@ -1570,7 +1629,7 @@ class Modprobe:
             new_module = Module(entry)
         for key in entry.keys():
             setattr(task, key, getattr(new_module, key))
-        self.taskdb.update(task)
+        self.taskdb[task.name] = task
 
     def add_modules(self, file):
         with open(file, "rb") as fp:
