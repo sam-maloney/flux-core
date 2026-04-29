@@ -379,6 +379,8 @@ class TaskDB:
             True if at least one non-disabled task provides service
         """
         for x in tasks:
+            if x not in self:
+                continue
             task = self.get(x)
             if not task.disabled and service in (task.name, *task.provides):
                 return True
