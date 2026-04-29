@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict, defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Dict, List, Set
 
 import flux
 import flux.importer
@@ -223,7 +224,7 @@ class TaskDB:
             return max(tasks.values(), key=lambda e: (e.priority, e.index)).task
         return max(not_disabled.values(), key=lambda e: (e.priority, e.index)).task
 
-    def get_all(self, service: str) -> list:
+    def get_all(self, service: str) -> List["Task"]:
         """
         Return all tasks providing ``service``, sorted by (priority, index).
 
@@ -491,7 +492,7 @@ class DependencySolver:
                 return True
         return False
 
-    def solve_requirements(self, tasks, ignore_disabled=False) -> list:
+    def solve_requirements(self, tasks, ignore_disabled=False) -> List[str]:
         """
         Recursively find all requirements of tasks.
 
@@ -542,7 +543,7 @@ class DependencySolver:
 
         return result
 
-    def solve_needs(self, tasks) -> list:
+    def solve_needs(self, tasks) -> List[str]:
         """
         Filter out tasks where needs constraints are not met.
 
@@ -591,7 +592,7 @@ class DependencySolver:
         # Return new list with removed tasks filtered out
         return [name for name in tasks_list if name not in removed]
 
-    def solve_execution_order(self, tasks) -> dict:
+    def solve_execution_order(self, tasks) -> Dict[str, List[str]]:
         """
         Build precedence graph for tasks based on before/after constraints.
 
@@ -681,7 +682,7 @@ class DependencySolver:
                     if successor in deps:
                         deps[successor].append(task.name)
 
-    def get_requires(self, tasks) -> dict:
+    def get_requires(self, tasks) -> Dict[str, List[str]]:
         """
         Get forward requires dependency map for tasks.
 
@@ -697,7 +698,7 @@ class DependencySolver:
             deps[task.name] = list(task.requires)
         return deps
 
-    def get_reverse_requires(self, tasks) -> dict:
+    def get_reverse_requires(self, tasks) -> Dict[str, Set[str]]:
         """
         Get reverse requires dependency map for tasks.
 
@@ -716,7 +717,9 @@ class DependencySolver:
                 rdeps[req].add(task.name)
         return rdeps
 
-    def solve_removal(self, dependencies: dict, modules_to_remove) -> list:
+    def solve_removal(
+        self, dependencies: Dict[str, List[str]], modules_to_remove
+    ) -> List[str]:
         """
         Find modules that can be safely removed.
 
@@ -823,7 +826,7 @@ class ConfigLoader:
         self.searchpath = searchpath
         self.print = print_func
 
-    def get_toml_files(self):
+    def get_toml_files(self) -> List[str]:
         """
         Return all modprobe config toml files found in the following order:
          - Always read ``{fluxdatadir}/modprobe/modprobe.toml``
@@ -842,7 +845,7 @@ class ConfigLoader:
         files.extend(self._searchpath_expand())
         return files
 
-    def get_rc_files(self, name="rc1"):
+    def get_rc_files(self, name="rc1") -> List[str]:
         """
         Return all modprobe rc *.py files found in the following order:
          - Always read ``{fluxdatadir}/modprobe/{name}.py`` (e.g. ``rc1.py``)
@@ -864,7 +867,7 @@ class ConfigLoader:
         files.extend(self._searchpath_expand(name=name, ext="py"))
         return files
 
-    def _searchpath_expand(self, name="modprobe", ext="toml"):
+    def _searchpath_expand(self, name="modprobe", ext="toml") -> List[str]:
         """
         Expand searchpath for extension ``ext`` based on configured paths.
 
@@ -883,7 +886,7 @@ class ConfigLoader:
         return files
 
     @staticmethod
-    def build_searchpath(builtindir="datadir"):
+    def build_searchpath(builtindir="datadir") -> List[str]:
         """
         Build searchpath list from environment variables and config.
 
