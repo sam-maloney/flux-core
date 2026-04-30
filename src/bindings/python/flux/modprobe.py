@@ -8,7 +8,92 @@
 # SPDX-License-Identifier: LGPL-3.0
 ##############################################################
 
-import bisect
+"""
+Flux modprobe: Task and module orchestration for broker startup/shutdown.
+
+This module implements the Flux modprobe system, which manages broker
+module loading/unloading and task execution during rc1 (startup) and
+rc3 (shutdown). It provides declarative configuration through TOML files
+and Python rc scripts with dependency resolution and precedence ordering.
+
+Architecture
+============
+
+The implementation is organized into several key components:
+
+**TaskDB**: Priority-based task database supporting service alternatives.
+  Stores tasks in a dict-of-dicts structure {service: {name: TaskEntry}}
+  where TaskEntry is a namedtuple(index, task). Priority comes from
+  task.priority. When selecting a task for a service, the highest priority
+  enabled task is chosen.
+
+**DependencySolver**: Dependency resolution engine.
+  Handles recursive requirement resolution (requires), needs filtering,
+  execution order precedence (before/after), and safe module removal.
+
+**ConfigLoader**: Configuration and rc file loading.
+  Manages search paths and loads TOML module config and Python rc files
+  from configurable directories.
+
+**Task**: Base class for modprobe tasks.
+  Represents a task with configuration including ranks, dependencies,
+  and enabled/disabled state. A task can be load/remove of a module (the
+  Module class) or a Python function (CodeTask class: Python function
+  decorated with @task).
+
+**Context**: Execution context passed to all tasks.
+  Provides access to broker configuration, attributes, environment
+  variables, shared data between tasks, and module argument management.
+  Uses thread-local storage to provide an automatic per-thread Flux handle.
+
+**Modprobe**: Main orchestrator class.
+  Coordinates TaskDB, DependencySolver, and ConfigLoader. Provides
+  high-level operations: configure_modules(), load(), remove(), run(),
+  read_rcfile(). Used by flux-modprobe(1) command.
+
+Usage Example
+=============
+
+Creating tasks in rc1.py::
+
+    from flux.modprobe import task
+
+    @task("setup-kvs", ranks="0", after=["kvs"], needs=["kvs"])
+    def setup_kvs(context):
+        # Configure KVS after it loads
+        context.print("Configuring KVS")
+        # ... setup code ...
+
+Using Modprobe programmatically::
+
+    from flux.modprobe import Modprobe
+
+    M = Modprobe(verbose=True)
+    M.configure_modules()
+    M.load(["kvs", "job-manager"])
+    M.run(M.get_deps(["kvs", "job-manager"]))
+
+Configuration
+=============
+
+Module configuration in modprobe.toml::
+
+    [[modules]]
+    name = "kvs"
+    ranks = "all"
+    provides = ["kvs-service"]
+    requires = []
+    after = []
+
+    [[modules]]
+    name = "job-manager"
+    ranks = "0"
+    requires = ["kvs"]
+    after = ["kvs"]
+
+See flux-modprobe(1) for complete configuration documentation.
+"""
+
 import concurrent
 import glob
 import os
@@ -19,6 +104,7 @@ import time
 from collections import OrderedDict, defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Dict, List, Set
 
 import flux
 import flux.importer
@@ -26,6 +112,10 @@ from flux.conf_builtin import conf_builtin_get
 from flux.idset import IDset
 from flux.utils import tomli as tomllib
 from flux.utils.graphlib import TopologicalSorter
+
+# ==============================================================================
+# SECTION 1: Utility Functions
+# ==============================================================================
 
 
 def run_all_rc_scripts(runlevel):
@@ -101,6 +191,11 @@ def default_flux_confdir():
     return Path(conf_builtin_get("confdir"))
 
 
+# ==============================================================================
+# SECTION 2: Core Data Structures
+# ==============================================================================
+
+
 class RankConditional:
     """
     Conditional rank statement, e.g. ``>0``
@@ -121,7 +216,7 @@ class RankConditional:
         return rank < self.rank
 
     def __str__(self):
-        s = ">" if self.gt else ">"
+        s = ">" if self.gt else "<"
         return f"{s}{self.rank}"
 
 
@@ -162,9 +257,827 @@ def rank_conditional(arg):
     return cls(arg)
 
 
+class TaskDB:
+    """
+    Task database supporting service alternatives and priority-based selection.
+
+    Structure: {service: {task_name: TaskEntry(index, task)}}
+
+    Tasks are stored in a dict-of-dicts structure where each service maps to
+    a dict of task names to entries. Each entry is a TaskEntry namedtuple with
+    insertion index (int) and task object. Priority comes from task.priority.
+
+    Priority Model:
+    - task.priority is the single source of truth
+    - set_alternative() boosts task.priority to ensure the task will be
+      the highest priority alternative. This affects all services the
+      task provides
+    - Priority updates via config/TOML set task.priority globally
+    """
+
+    TaskEntry = namedtuple("TaskEntry", ["index", "task"])
+
+    def __init__(self):
+        # {service: {task_name: TaskEntry(index, task)}}
+        self._services = defaultdict(dict)
+        self._insertion_counter = 0
+
+    def add(self, task: "Task", index: int = None) -> None:
+        """Add task to database for its name and all services it provides"""
+        if index is None:
+            index = self._insertion_counter
+            self._insertion_counter += 1
+        entry = self.TaskEntry(index, task)
+        for service in (task.name, *task.provides):
+            self._services[service][task.name] = entry
+
+    def get(self, service: str) -> "Task":
+        """
+        Return the highest priority task providing ``service`` which is not
+        disabled. If there are no non-disabled tasks providing ``service``,
+        then return the highest priority task regardless of disabled status.
+        If no tasks provide ``service``, raise ``ValueError``.
+
+        Note: Only checks the `disabled` flag, not the full `enabled()` method
+        which requires context for rank/config/attr checks.
+        """
+        if service not in self._services or len(self._services[service]) == 0:
+            raise ValueError(f"no such task or module {service}")
+
+        tasks = self._services[service]
+        # Find non-disabled tasks with highest (priority, index)
+        not_disabled = {
+            name: entry for name, entry in tasks.items() if not entry.task.disabled
+        }
+        if not not_disabled:
+            # Return highest priority task even if disabled
+            return max(tasks.values(), key=lambda e: (e.task.priority, e.index)).task
+        return max(not_disabled.values(), key=lambda e: (e.task.priority, e.index)).task
+
+    def get_all(self, service: str) -> List["Task"]:
+        """
+        Return all tasks providing ``service``, sorted by (priority, index).
+
+        Args:
+            service: Service or task name to look up
+
+        Returns:
+            List of Task objects sorted from lowest to highest priority.
+            Empty list if service doesn't exist.
+        """
+        if service not in self._services:
+            return []
+        tasks = self._services[service]
+        # Sort by (priority, index) ascending
+        sorted_entries = sorted(
+            tasks.values(), key=lambda e: (e.task.priority, e.index)
+        )
+        return [e.task for e in sorted_entries]
+
+    def get_entry(self, service: str, task_name: str):
+        """
+        Get TaskEntry for a specific task providing a service.
+
+        Args:
+            service: Service name
+            task_name: Task name
+
+        Returns:
+            TaskEntry with priority, index, and task
+
+        Raises:
+            ValueError: If service or task not found
+        """
+        if service not in self._services:
+            raise ValueError(f"no such service {service}")
+        if task_name not in self._services[service]:
+            raise ValueError(f"task {task_name} does not provide {service}")
+        return self._services[service][task_name]
+
+    def set_alternative(self, service: str, name: str) -> None:
+        """
+        Select a specific alternative 'name' for service.
+
+        Boosts task.priority above all other tasks providing this service.
+        Since priority is global to the task, this affects all services
+        the task provides.
+        """
+        if service not in self._services:
+            raise ValueError(f"no such service {service}")
+        if name not in self._services[service]:
+            raise ValueError(f"no module {name} provides {service}")
+
+        tasks = self._services[service]
+        # nothing to do if only one alternative
+        if len(tasks) == 1:
+            return
+
+        # Find max priority and bump selected alternative above it
+        max_priority = max(e.task.priority for e in tasks.values())
+        entry = tasks[name]
+
+        # Update task.priority - this affects all services the task provides
+        entry.task.priority = max_priority + 1
+
+    def disable(self, service: str) -> None:
+        """Disable all tasks providing this task/module/service"""
+        if service not in self._services or not self._services[service]:
+            raise ValueError(f"no such module or task '{service}'")
+        for entry in self._services[service].values():
+            entry.task.disabled = True
+
+    def enable(self, service: str) -> None:
+        """
+        Force a module/task/service to be enabled even if it would normally
+        be disabled by rank, needs-config, or needs-attr.
+        """
+        if service not in self._services or not self._services[service]:
+            raise ValueError(f"no such module or task '{service}'")
+        for entry in self._services[service].values():
+            entry.task.force_enabled = True
+
+    def __contains__(self, service: str) -> bool:
+        """
+        Check if service exists in database (enables 'in' operator).
+
+        Example:
+            if "kvs" in taskdb:
+                task = taskdb.get("kvs")
+        """
+        return service in self._services and len(self._services[service]) > 0
+
+    def __setitem__(self, name: str, task: "Task") -> None:
+        """
+        Add or update task in database (enables dict-like assignment).
+
+        Example:
+            taskdb["kvs"] = kvs_task  # Add or update
+
+        Args:
+            name: Task name (must match task.name)
+            task: Task object to add/update
+
+        Raises:
+            ValueError: If name doesn't match task.name
+        """
+        # TaskDB invariant is that tasks are stored first under task.name.
+        # Ensure that's not violated here:
+        if name != task.name:
+            raise ValueError(f"Key '{name}' doesn't match task.name '{task.name}'")
+
+        # Check if task exists
+        found = False
+        for service in self._services:
+            if task.name in self._services[service]:
+                found = True
+                break
+
+        if not found:
+            self.add(task)
+            return
+
+        # Update all services where this task should appear
+        for service in (task.name, *task.provides):
+            if service in self._services and task.name in self._services[service]:
+                old_entry = self._services[service][task.name]
+                self._services[service][task.name] = self.TaskEntry(
+                    old_entry.index,
+                    task,
+                )
+            else:
+                # New service added to provides
+                for existing_service in self._services:
+                    if task.name in self._services[existing_service]:
+                        old_entry = self._services[existing_service][task.name]
+                        entry = self.TaskEntry(old_entry.index, task)
+                        self._services[service][task.name] = entry
+                        break
+
+    def has_enabled_provider(self, tasks, service: str) -> bool:
+        """
+        Check if any non-disabled task in tasks provides the given service.
+
+        Args:
+            tasks: Iterable of task names to check
+            service: Service name to look for
+
+        Returns:
+            True if at least one non-disabled task provides service
+        """
+        for x in tasks:
+            if x not in self:
+                continue
+            task = self.get(x)
+            if not task.disabled and service in (task.name, *task.provides):
+                return True
+        return False
+
+
+class DependencySolver:
+    """
+    Handles all dependency resolution for modprobe tasks.
+
+    This class encapsulates the complex logic for resolving task dependencies,
+    including:
+    - Finding all required dependencies (requires)
+    - Filtering tasks based on needs constraints
+    - Building execution order precedence graphs (before/after)
+    - Finding safely removable modules
+
+    Separated from Modprobe class for clarity and testability.
+    """
+
+    def __init__(self, taskdb, context):
+        """
+        Initialize dependency solver.
+
+        Args:
+            taskdb: TaskDB instance for task lookup
+            context: Context instance for checking enabled status
+        """
+        self.taskdb = taskdb
+        self.context = context
+
+    def resolve_service(self, service: str, ignore_needs: bool = False):
+        """
+        Resolve service name to actual task, considering needs constraints.
+
+        Returns the highest priority task providing `service` that:
+        1. Is enabled (passes enabled() check with context)
+        2. Has all its needs satisfied (unless ignore_needs=True)
+
+        Falls back to highest priority task if no viable tasks exist.
+
+        Args:
+            service: Service or task name to resolve
+            ignore_needs: If True, skip needs checking (for explicit loads)
+
+        Returns:
+            Task object
+
+        Raises:
+            ValueError: If service doesn't exist in taskdb
+        """
+        candidates = self.taskdb.get_all(service)
+        if not candidates:
+            raise ValueError(f"no such task or module {service}")
+
+        # Find viable candidates (enabled + needs satisfied)
+        viable = []
+        for task in candidates:
+            if not task.enabled(self.context):
+                continue
+            if ignore_needs or self._needs_satisfied(task):
+                viable.append(task)
+
+        if viable:
+            # Return highest priority viable task
+            def priority_key(t):
+                entry = self.taskdb.get_entry(service, t.name)
+                return (entry.task.priority, entry.index)
+
+            return max(viable, key=priority_key)
+
+        # Fallback: return highest priority task even if not viable
+        return candidates[-1]  # get_all returns sorted, so last is highest
+
+    def _needs_satisfied(self, task, checking=None) -> bool:
+        """
+        Check if all of task's needs are satisfiable.
+
+        A need is satisfiable if there exists an enabled task providing
+        that service whose needs are also satisfied (checked recursively).
+
+        Args:
+            task: Task to check
+            checking: Set of task names currently being checked (prevents cycles)
+
+        Returns:
+            True if all needs are satisfied, False otherwise
+        """
+        if checking is None:
+            checking = set()
+
+        if task.name in checking:
+            return False  # Circular dependency
+
+        checking.add(task.name)
+
+        for need in task.needs:
+            if not self._has_enabled_provider(need, checking):
+                return False
+
+        return True
+
+    def _has_enabled_provider(self, service: str, checking: set) -> bool:
+        """
+        Check if any enabled task with satisfied needs provides this service.
+
+        Args:
+            service: Service name to check
+            checking: Set of task names being checked (prevents cycles)
+
+        Returns:
+            True if an enabled provider with satisfied needs exists
+        """
+        candidates = self.taskdb.get_all(service)
+        for task in candidates:
+            if not task.enabled(self.context):
+                continue
+            if task.name in checking:
+                continue  # Skip if we're already checking this task
+            if self._needs_satisfied(task, checking):
+                return True
+        return False
+
+    def solve_requirements(self, tasks, ignore_disabled=False) -> List[str]:
+        """
+        Recursively find all requirements of tasks.
+
+        Args:
+            tasks: Iterable of task names to solve
+            ignore_disabled: If True, include disabled tasks in result
+
+        Returns:
+            List of task names including all required dependencies.
+            Disabled tasks are skipped unless ignore_disabled=True.
+            Does not modify input.
+        """
+        result = self._solve_requirements_impl(tasks, set(), set(), ignore_disabled)
+        return list(result)
+
+    def _solve_requirements_impl(self, tasks, visited, skipped, ignore_disabled):
+        """
+        Internal recursive implementation of solve_requirements.
+
+        Args:
+            tasks: Iterable of task names to solve
+            visited: Set of already-visited tasks (prevents infinite recursion)
+            skipped: Set of skipped (disabled) tasks
+            ignore_disabled: If True, include disabled tasks in result
+
+        Returns:
+            Set of task names including all required dependencies
+        """
+        result = set()
+        to_visit = [x for x in tasks if x not in visited]
+
+        for name in to_visit:
+            # Use resolve_service to get the right task (considering needs)
+            task = self.resolve_service(name, ignore_needs=ignore_disabled)
+            if ignore_disabled or task.enabled(self.context):
+                result.add(task.name)
+            else:
+                skipped.add(task.name)
+            visited.add(task.name)
+            if task.requires:
+                rset = self._solve_requirements_impl(
+                    tasks=task.requires,
+                    visited=visited,
+                    skipped=skipped,
+                    ignore_disabled=ignore_disabled,
+                )
+                result.update(rset)
+
+        return result
+
+    def solve_needs(self, tasks) -> List[str]:
+        """
+        Filter out tasks where needs constraints are not met.
+
+        When a task is removed because a needed service is not available,
+        all tasks that need it are also recursively removed.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            New list of task names with unsatisfied needs removed.
+            Does not modify input.
+        """
+        # Work on a copy to avoid mutating caller's data
+        tasks_list = list(tasks)
+        removed = set()
+
+        def mark_for_removal(task_name):
+            """Recursively mark task and its dependents for removal"""
+            if task_name in removed or task_name not in tasks_list:
+                return
+
+            removed.add(task_name)
+
+            # Find what this task provides
+            task = self.resolve_service(task_name, ignore_needs=False)
+            provides_set = set((task.name, *task.provides))
+
+            # Mark all tasks that need this task for removal
+            for name in tasks_list:
+                if name not in removed:
+                    x = self.resolve_service(name, ignore_needs=False)
+                    if not provides_set.isdisjoint(x.needs):
+                        mark_for_removal(name)
+
+        # Check each task's needs
+        for name in tasks_list:
+            if name in removed:
+                continue
+            task = self.resolve_service(name, ignore_needs=False)
+            for need in task.needs:
+                if not self.taskdb.has_enabled_provider(tasks_list, need):
+                    mark_for_removal(name)
+                    break
+
+        # Return new list with removed tasks filtered out
+        return [name for name in tasks_list if name not in removed]
+
+    def solve_execution_order(self, tasks) -> Dict[str, List[str]]:
+        """
+        Build precedence graph for tasks based on before/after constraints.
+
+        Args:
+            tasks: List/set of task names
+
+        Returns:
+            Dict mapping task names to list of predecessor task names
+
+        Note: If tasks is a set, a copy is made internally to avoid mutating
+        the input. Lists are always converted to sets internally.
+        """
+        if not isinstance(tasks, set):
+            tasks = set(tasks)
+        else:
+            tasks = set(tasks)  # Make a copy to avoid mutating caller's set
+        deps = {}
+
+        # Cache resolve_service calls to avoid repeated lookups
+        resolve_cache = {}
+
+        def resolve_cached(name):
+            if name not in resolve_cache:
+                resolve_cache[name] = self.resolve_service(name, ignore_needs=False)
+            return resolve_cache[name]
+
+        # Ensure tasks set contains all provides and the actual task name
+        # (since presence in the set determines if a task is included in
+        # the predecessor list below)
+        provides = set()
+        for task in tasks:
+            # Use resolve_service to get the right task (considering needs)
+            task = resolve_cached(task)
+            provides.add(task.name)
+            provides.update(task.provides)
+        tasks.update(provides)
+
+        for name in tasks:
+            task = resolve_cached(name)
+            if "*" in task.after:
+                # Add all tasks to deps (except those that also specify "*"
+                # in their 'after' list)
+                resolved_tasks = [(x, resolve_cached(x)) for x in tasks]
+                deps[task.name] = [
+                    t.name for x, t in resolved_tasks if "*" not in t.after
+                ]
+            else:
+                after_tasks = [resolve_cached(x).name for x in task.after]
+                deps[task.name] = [x for x in after_tasks if x in tasks]
+
+        # Process before constraints
+        self._process_before(tasks, deps, resolve_cache)
+
+        return deps
+
+    def _process_before(self, tasks, deps, resolve_cache=None):
+        """
+        Process task.before constraints by appending to successor predecessor lists.
+
+        Args:
+            tasks: Set of task names
+            deps: Dict of task names to predecessor lists (modified in place)
+            resolve_cache: Optional dict cache for resolve_service results
+        """
+        if resolve_cache is None:
+            resolve_cache = {}
+
+        def resolve_cached(name):
+            if name not in resolve_cache:
+                resolve_cache[name] = self.resolve_service(name, ignore_needs=False)
+            return resolve_cache[name]
+
+        def deps_add_all(name):
+            """Add name as a predecessor to all entries in deps"""
+            for task in [resolve_cached(x) for x in deps.keys()]:
+                if "*" not in task.before:
+                    deps[task.name].append(name)
+
+        for name in tasks:
+            task = resolve_cached(name)
+            for successor in task.before:
+                if successor == "*":
+                    deps_add_all(task.name)
+                else:
+                    # resolve real successor name:
+                    successor = resolve_cached(successor).name
+                    if successor in deps:
+                        deps[successor].append(task.name)
+
+    def get_requires(self, tasks) -> Dict[str, List[str]]:
+        """
+        Get forward requires dependency map for tasks.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict mapping each task name to list of tasks it requires
+        """
+        deps = {}
+        for name in tasks:
+            task = self.resolve_service(name, ignore_needs=False)
+            deps[task.name] = list(task.requires)
+        return deps
+
+    def get_reverse_requires(self, tasks) -> Dict[str, Set[str]]:
+        """
+        Get reverse requires dependency map for tasks.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict mapping each task name to set of tasks that require it
+        """
+        rdeps = {}
+        for name in tasks:
+            task = self.resolve_service(name, ignore_needs=False)
+            for req in task.requires:
+                if req not in rdeps:
+                    rdeps[req] = set()
+                rdeps[req].add(task.name)
+        return rdeps
+
+    def solve_removal(
+        self, dependencies: Dict[str, List[str]], modules_to_remove
+    ) -> List[str]:
+        """
+        Find modules that can be safely removed.
+
+        Given a set of modules to remove and their dependency lists, finds
+        additional modules that can be removed because they no longer have
+        any dependents.
+
+        Args:
+            dependencies: Dict of modules to their dependency list
+            modules_to_remove: Iterable of modules to remove
+
+        Returns:
+            New list of modules that can be safely removed (includes original
+            modules plus cascaded removals). Does not modify inputs.
+
+        Raises:
+            ValueError: If any module to remove still has dependents
+        """
+        # Build reverse dependency map
+        dependents = {}
+        for dependent, reqs in dependencies.items():
+            for req in reqs:
+                if req not in dependents:
+                    dependents[req] = set()
+                dependents[req].add(dependent)
+
+        # Start with the items we're told to remove
+        removed_items = set(modules_to_remove)
+        result = list(modules_to_remove)
+
+        # Keep track of items to check in this iteration
+        modules_to_check = set(modules_to_remove)
+
+        while modules_to_check:
+            next_modules_to_check = set()
+
+            for removed_item in modules_to_check:
+                # Find all dependencies of the removed item (items it depended on)
+                if removed_item in dependencies:
+                    for dependency in dependencies[removed_item]:
+                        # Skip if this dependency is already being removed
+                        if dependency in removed_items:
+                            continue
+
+                        # Check if this dependency still has other items depending on it
+                        remaining_dependents = (
+                            dependents.get(dependency, set()) - removed_items
+                        )
+
+                        # If no remaining dependents, it can be removed
+                        if not remaining_dependents:
+                            removed_items.add(dependency)
+                            result.append(dependency)
+                            next_modules_to_check.add(dependency)
+
+            modules_to_check = next_modules_to_check
+
+        # Check if any removed modules still have dependents
+        # (build a clean view of dependents with removed items filtered out)
+        for name in result:
+            remaining = dependents.get(name, set()) - removed_items
+            # Also filter out by real task name in case of aliases
+            if name in self.taskdb:
+                remaining = {
+                    dep
+                    for dep in remaining
+                    if dep not in removed_items
+                    and dep in self.taskdb
+                    and self.taskdb.get(dep).name not in removed_items
+                }
+            # else: Task doesn't exist in taskdb (e.g., nonexistent module)
+            # Just use the remaining set as-is
+            if remaining:
+                raise ValueError(
+                    f"{name} still in use by " + ", ".join(sorted(remaining))
+                )
+
+        return result
+
+
+class ConfigLoader:
+    """
+    Configuration and rc file loading with search path management.
+
+    ConfigLoader handles all file I/O for modprobe configuration,
+    separating I/O concerns from business logic. It manages search paths
+    for both TOML module config files and Python rc scripts.
+
+    Search Path:
+        Default search path is built from:
+        - Built-in: $datadir/modprobe or $libexecdir/modprobe
+        - FLUX_MODPROBE_PATH (replaces default)
+        - FLUX_MODPROBE_PATH_PREPEND (added before default)
+        - FLUX_MODPROBE_PATH_APPEND (added after default)
+
+    File Discovery:
+        TOML: modprobe.toml and modprobe.d/*.toml
+        RC:   rc1.py, rc1.d/*.py (or rc3.py, rc3.d/*.py)
+
+    Attributes:
+        searchpath (dict): Paths for 'toml' and 'py' file types
+        print (callable): Function for verbose output
+    """
+
+    def __init__(self, searchpath, print_func):
+        """
+        Initialize configuration loader.
+
+        Args:
+            searchpath: Dict of {"toml": [paths...], "py": [paths...]}
+            print_func: Function to call for debug output
+        """
+        self.searchpath = searchpath
+        self.print = print_func
+
+    def get_toml_files(self) -> List[str]:
+        """
+        Return all modprobe config toml files found in the following order:
+         - Always read ``{fluxdatadir}/modprobe/modprobe.toml``
+         - for dir in self.searchpath: read ``{dir}/modprobe.d/*.toml``
+
+        Returns:
+            List of absolute paths to TOML files
+        """
+        files = []
+        builtin_toml_config = (
+            Path(conf_builtin_get("datadir")) / "modprobe" / "modprobe.toml"
+        )
+        self.print(f"checking {builtin_toml_config}")
+        if builtin_toml_config.exists():
+            files.append(str(builtin_toml_config))
+        files.extend(self._searchpath_expand())
+        return files
+
+    def get_rc_files(self, name="rc1") -> List[str]:
+        """
+        Return all modprobe rc *.py files found in the following order:
+         - Always read ``{fluxdatadir}/modprobe/{name}.py`` (e.g. ``rc1.py``)
+         - for dir in self.searchpath: read ``{dir}/{name}.d/*.py``
+
+        Args:
+            name: RC file basename (e.g., "rc1", "rc3")
+
+        Returns:
+            List of absolute paths to Python RC files
+        """
+        files = []
+        builtin_rc_file = (
+            Path(conf_builtin_get("libexecdir")) / "modprobe" / f"{name}.py"
+        )
+        self.print(f"checking {builtin_rc_file}")
+        if builtin_rc_file.exists():
+            files.append(str(builtin_rc_file))
+        files.extend(self._searchpath_expand(name=name, ext="py"))
+        return files
+
+    def _searchpath_expand(self, name="modprobe", ext="toml") -> List[str]:
+        """
+        Expand searchpath for extension ``ext`` based on configured paths.
+
+        Args:
+            name: Base name for .d directory (e.g., "modprobe", "rc1")
+            ext: File extension to search for (e.g., "toml", "py")
+
+        Returns:
+            List of absolute paths to files found
+        """
+        files = []
+        for directory in self.searchpath[ext]:
+            self.print(f"checking {directory}/{name}.d/*.{ext}")
+            if Path(directory).exists():
+                files.extend(sorted(glob.glob(f"{directory}/{name}.d/*.{ext}")))
+        return files
+
+    @staticmethod
+    def build_searchpath(builtindir="datadir") -> List[str]:
+        """
+        Build searchpath list from environment variables and config.
+
+        Returns list of dirs in ``FLUX_MODPROBE_PATH`` if set, otherwise
+        returns the default modprobe search path.
+
+        Args:
+            builtindir: base path for builtin/package path. Should
+                be either "datadir" or "libexecdir".
+
+        Returns:
+            List of directory paths (duplicates removed)
+        """
+        searchpath = []
+        if "FLUX_MODPROBE_PATH" in os.environ:
+            searchpath = filter(
+                lambda s: s and not s.isspace(),
+                os.environ["FLUX_MODPROBE_PATH"].split(":"),
+            )
+        else:
+            pkgdir = conf_builtin_get(builtindir)
+            confdir = conf_builtin_get("confdir")
+            searchpath = [f"{pkgdir}/modprobe", f"{confdir}/modprobe"]
+
+        if "FLUX_MODPROBE_PATH_APPEND" in os.environ:
+            searchpath.extend(
+                filter(
+                    lambda s: s and not s.isspace(),
+                    os.environ["FLUX_MODPROBE_PATH_APPEND"].split(":"),
+                )
+            )
+
+        # return searchpath without duplicates
+        return list(OrderedDict.fromkeys(searchpath))
+
+
+# ==============================================================================
+# SECTION 3: Task Definitions
+# ==============================================================================
+
+
 class Task:
     """
-    Class representing a modprobe task and associated configuration
+    Base class representing a modprobe task and its configuration.
+
+    A Task represents a unit of work in the modprobe system with
+    associated configuration controlling when and where it runs. Tasks
+    can be broker modules (Module subclass) or Python functions
+    (CodeTask subclass).
+
+    Configuration Attributes:
+        name (str): Unique task identifier
+        ranks (RankConditional|RankIDset): Ranks where task executes
+        provides (list): Service names this task provides (alternatives)
+        requires (list): Tasks/services that must be active when this runs
+        needs (list): Tasks/services that must be enabled for this to
+            enable
+        before (list): Tasks/services this must run before
+        after (list): Tasks/services this must run after
+        needs_attrs (list): Required broker attributes
+        needs_config (list): Required config keys
+        needs_env (list): Required environment variables
+        disabled (bool): Whether task is explicitly disabled
+        priority (int): Priority for service alternative selection
+            (default 100)
+
+    Special Values:
+        - before=["*"]: Run before all other tasks (cannot also use after)
+        - after=["*"]: Run after all other tasks (cannot also use before)
+        - Specs starting with "!" are inverted (must NOT be set)
+
+    Runtime Attributes:
+        starttime (float): Task start timestamp (set during execution)
+        endtime (float): Task end timestamp (set during execution)
+        force_enabled (bool): Override disabled state (internal use)
+
+    Enabling Logic:
+        A task is enabled if ALL of the following are true:
+        1. Not explicitly disabled via disabled=True
+        2. Runs on the current broker rank
+        3. All needs_config keys are set (or not set if prefixed with !)
+        4. All needs_attrs attributes are set (or not set if !)
+        5. All needs_env variables are set (or not set if !)
+        6. All tasks in needs list are also enabled
     """
 
     VALID_ARGS = {
@@ -405,108 +1318,6 @@ class Module(Task):
         }
 
 
-class TaskDB:
-    """
-    Dict of service/module name to list of tasks sorted such the
-    current default task is at the end of the list.
-    """
-
-    TaskEntry = namedtuple("TaskEntry", ("priority", "index", "task"))
-
-    def __init__(self):
-        self.tasks = defaultdict(list)
-
-    def add(self, task, index=None):
-        for name in (*task.provides, task.name):
-            if index is None:
-                index = len(self.tasks[name])
-            bisect.insort_right(
-                self.tasks[name],
-                self.TaskEntry(task.priority, index, task),
-            )
-
-    def get(self, service):
-        """
-        Return the highest priority task providing ``service`` which is also
-        enabled. If there are no enabled tasks providing ``service``, then
-        return the highest priority task. If no tasks provide ``service``,
-        raise ``ValueError``.
-        """
-        if len(self.tasks[service]) == 0:
-            raise ValueError(f"no such task or module {service}")
-        enabled = list(filter(lambda x: x.task.enabled(), self.tasks[service]))
-        if len(enabled) == 0:
-            return self.tasks[service][-1].task
-        return enabled[-1].task
-
-    def update(self, task):
-        """
-        Update a task object which already resides in the taskdb by removing
-        the task from all service name lists and re-adding it, preserving the
-        original insertion order. This handles any potential update of a task,
-        such as a new ``priority``, or additional ``provides``
-        """
-        for name in (task.name, *task.provides):
-            to_remove = -1
-            for i, entry in enumerate(self.tasks[name]):
-                if entry.task == task:
-                    to_remove = i
-                    break
-            if to_remove < 0:
-                raise ValueError(f"{task.name} not found in taskdb {name} list")
-
-            # remove task from this list and re-insert, preserving the
-            # original insertion index:
-            self.tasks[name].pop(to_remove)
-            self.add(task, index=entry.index)
-
-    def set_alternative(self, service, name, propagate=True):
-        """Select a specific alternative 'name' for service"""
-        lst = self.tasks[service]
-        try:
-            index = next(i for i, x in enumerate(lst) if x.task.name == name)
-        except StopIteration:
-            raise ValueError(f"no module {name} provides {service}")
-
-        # nothing to do if list has length of 1
-        if len(lst) == 1:
-            return
-
-        # bump priority of new task and move to end of list:
-        entry = lst.pop(index)
-        priority = lst[-1].priority
-        lst.append(self.TaskEntry(priority + 1, entry.index, entry.task))
-
-        # now do the same for any other provides in this module
-        if propagate:
-            for provides in set(entry.task.provides) - {service}:
-                self.set_alternative(provides, name, propagate=False)
-
-    def disable(self, service):
-        """disable task/module/service with name 'service'"""
-        if not self.tasks[service]:
-            raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
-            entry.task.disabled = True
-
-    def enable(self, service):
-        """
-        Force a module/task/service to be enabled even if it would normally
-        be disabled by rank, needs-config, or needs-attr.
-        """
-        if not self.tasks[service]:
-            raise ValueError(f"no such module or task '{service}'")
-        for entry in self.tasks[service]:
-            entry.task.force_enabled = True
-
-    def any_provides(self, tasks, name):
-        """Return True if any task in tasks provides name"""
-        for task in [self.get(x) for x in tasks]:
-            if not task.disabled and name in (task.name, *task.provides):
-                return True
-        return False
-
-
 def task(name, **kwargs):
     """
     Decorator for modprobe "rc" task functions.
@@ -564,11 +1375,42 @@ def task(name, **kwargs):
     return create_task
 
 
+# ==============================================================================
+# SECTION 4: Execution Context
+# ==============================================================================
+
+
 class Context:
     """
-    Context object passed to all modprobe tasks.
-    Allows the passage of data between tasks, simple access to broker
-    configuration and attributes, addition of module arguments, etc.
+    Execution context passed to all modprobe tasks.
+
+    Context provides task functions with access to broker state,
+    configuration, and shared data. It enables tasks to query and modify
+    the environment, communicate with the broker, and share data with
+    other tasks.
+
+    Key Features:
+        - Broker access: Configuration, attributes, RPCs via Flux handle
+        - Environment: Get/set variables in current process and broker
+        - Shared data: Store/retrieve arbitrary data between tasks
+        - Module arguments: Configure module load-time arguments
+        - Thread safety: Per-thread Flux handles via thread-local storage
+
+    Common Methods:
+        handle: Flux handle for broker communication (thread-local)
+        rank: Current broker rank
+        conf_get(key): Get broker config value
+        attr_get(attr): Get broker attribute
+        getenv(var): Get environment variable (local or broker)
+        setenv(name, value): Set environment variable (local and broker)
+        set(key, value) / get(key): Store/retrieve shared data
+        setopt(module, options): Configure module arguments
+        rpc(topic, args): Send RPC to broker
+
+    Attributes:
+        verbose (bool): Verbose output mode
+        dry_run (bool): Dry-run mode (print without executing)
+        modprobe (Modprobe): Parent Modprobe instance
     """
 
     tls = threading.local()
@@ -631,7 +1473,22 @@ class Context:
         return self._broker_env_cache[var]
 
     def getenv(self, var, default=None):
-        """Get env var value locally or from local broker"""
+        """
+        Get environment variable value from local process or broker.
+
+        Checks the local process environment first, then falls back to
+        querying the broker via RPC. This is useful because the broker
+        may filter some variables from rc1/rc3 environments (e.g., those
+        set by resource managers or launchers). Results from broker are
+        cached.
+
+        Args:
+            var: Environment variable name
+            default: Value to return if variable is not set
+
+        Returns:
+            Variable value (str) or default if not set
+        """
         value = os.environ.get(var)
         if value is None:
             value = self._broker_getenv(var)
@@ -643,7 +1500,7 @@ class Context:
         """Set or unset environment variables in the current process and broker.
 
         Variables set via this method that are not in the broker's env
-        blocklist will be inherited by rc2 and rc3.  A value of None
+        blocklist will be inherited by rc2 and rc3. A value of None
         causes the named variable to be unset.
 
         Note: concurrent calls from unrelated tasks running in parallel are
@@ -652,7 +1509,7 @@ class Context:
 
         Args:
             name_or_env: a variable name string, or a dict mapping names
-                to values.  Values may be strings or None to unset.
+                to values. Values may be strings or None to unset.
             value: the value to set, when name_or_env is a string.
 
         Raises:
@@ -686,8 +1543,19 @@ class Context:
 
     def setopt(self, module, options, overwrite=False):
         """
-        Append option to module opts. ``option`` may contain multiple options
-        separated by whitespace.
+        Add module load-time arguments.
+
+        Appends options to a module's argument list (or overwrites if
+        overwrite=True). Options can be a single string with
+        whitespace-separated arguments.
+
+        Args:
+            module: Module name
+            options: Options string (whitespace-separated)
+            overwrite: Replace all existing options (default False)
+
+        Example:
+            context.setopt("kvs", "checkpoint-period=10m")
         """
         if overwrite:
             self.module_args_overwrite[module] = True
@@ -695,8 +1563,19 @@ class Context:
         self.module_args[module].extend(options.split())
 
     def getopts(self, name, default=None, also=None):
-        """Get module opts for module 'name'
-        If also is provided, append any module options for those names as well
+        """
+        Get module load-time arguments.
+
+        Retrieves the argument list for a module, optionally including
+        arguments from related modules.
+
+        Args:
+            name: Module name
+            default: Default arguments (used if no overwrite occurred)
+            also: List of additional module names whose args to include
+
+        Returns:
+            List of argument strings
         """
         lst = [name]
         if also is not None:
@@ -709,7 +1588,15 @@ class Context:
         return result
 
     def bash(self, command):
-        """Execute command under ``bash -c``"""
+        """
+        Execute shell command via bash -c.
+
+        Args:
+            command: Shell command string
+
+        Raises:
+            RuntimeError: If command exits non-zero or is killed by signal
+        """
         process = subprocess.run(["bash", "-c", command])
         if process.returncode != 0:
             if process.returncode > 0:
@@ -720,7 +1607,15 @@ class Context:
                 raise RuntimeError(f"bash: died by signal {process.returncode}")
 
     def load_modules(self, modules):
-        """Set a list of modules to load by name"""
+        """
+        Schedule modules to be loaded during task execution.
+
+        Adds modules to the active task list so they will be loaded when
+        run() is called. Typically used in setup() functions.
+
+        Args:
+            modules: List of module names to load
+        """
         self.modprobe.activate_modules(modules)
 
     def remove_modules(self, modules=None):
@@ -765,9 +1660,41 @@ class ModuleList:
         return self.servicemap.get(name, None)
 
 
+# ==============================================================================
+# SECTION 5: Main Orchestrator
+# ==============================================================================
+
+
 class Modprobe:
     """
-    The modprobe main class. Intended for use by flux-modprobe(1).
+    Main orchestrator for flux-modprobe task and module management.
+
+    Modprobe coordinates TaskDB, DependencySolver, and ConfigLoader to
+    provide high-level operations for module loading/unloading and task
+    execution. Used by flux-modprobe(1) command and available for
+    programmatic use.
+
+    Key Operations:
+        configure_modules(): Load module config from TOML files
+        load(modules): Load modules and their dependencies
+        remove(modules): Unload modules and unused dependencies
+        read_rcfile(name): Load and execute rc Python scripts
+        run(deps): Execute tasks in dependency order
+
+    Attributes:
+        taskdb (TaskDB): Task database
+        context (Context): Execution context
+        solver (DependencySolver): Dependency resolver
+        loader (ConfigLoader): Configuration loader
+        handle (Flux): Flux handle (from context)
+        rank (int): Broker rank
+        exitcode (int): Exit code (0=success, 1=failure)
+        timing (list): Optional timing data for performance analysis
+
+    Args:
+        timing (bool): Enable timing instrumentation (default False)
+        verbose (bool): Enable verbose output (default False)
+        dry_run (bool): Print actions without executing (default False)
     """
 
     def __init__(self, timing=False, verbose=False, dry_run=False):
@@ -781,10 +1708,16 @@ class Modprobe:
         self.handle = self.context.handle
         self.rank = self.handle.get_rank()
 
-        self.searchpath = {
-            "toml": self._get_searchpath(),
-            "py": self._get_searchpath(builtindir="libexecdir"),
+        # Initialize dependency solver
+        self.solver = DependencySolver(self.taskdb, self.context)
+
+        # Initialize configuration loader
+        searchpath = {
+            "toml": ConfigLoader.build_searchpath(),
+            "py": ConfigLoader.build_searchpath(builtindir="libexecdir"),
         }
+        self.loader = ConfigLoader(searchpath, self.print)
+        self.searchpath = searchpath  # Keep for backward compatibility
 
         # Active tasks are those added via the @task decorator, and
         # which will be active by default when running "all" tasks:
@@ -841,30 +1774,71 @@ class Modprobe:
 
     def add_active_task(self, task):
         """Add a task to the task db and active tasks list"""
-        self.add_task(task)
+        # Only add to taskdb if it doesn't exist yet (avoids duplicate entries)
+        if not self.has_task(task.name):
+            self.add_task(task)
         self._active_tasks.append(task.name)
 
     def get_task(self, name, default=None):
-        """Return current task providing string 'name'"""
+        """
+        Return task by name from taskdb.
+
+        Note: This does NOT do service resolution. For service-aware lookup
+        (e.g., "sched" -> actual scheduler module), use resolve_service().
+        """
         return self.taskdb.get(name)
+
+    def resolve_service(self, name, ignore_needs=False):
+        """
+        Resolve service name to actual task using needs-aware resolution.
+
+        This is the public API for service resolution. It considers:
+        - Task enabled/disabled status
+        - Needs constraints (unless ignore_needs=True)
+        - Priority and alternatives
+
+        Args:
+            name: Service or task name to resolve
+            ignore_needs: If True, skip needs checking
+
+        Returns:
+            Task object that would be loaded for this service
+        """
+        return self.solver.resolve_service(name, ignore_needs)
 
     def has_task(self, name):
         """Return True if task exists in taskdb"""
-        try:
-            self.taskdb.get(name)
-            return True
-        except ValueError:
-            return False
+        return name in self.taskdb
 
     def update_module(self, name, entry, new_module=None):
-        task = self.get_task(name)
+        """
+        Update attributes of an existing module/task.
+
+        Args:
+            name: Task name or service name to look up
+            entry: Dict of attribute updates to apply
+            new_module: Optional pre-constructed Module for attribute source
+
+        Note: 'name' may be a service name (e.g., "feasibility") rather than
+        the actual task name (e.g., "sched-simple"), so we never overwrite
+        task.name during updates.
+        """
+        old_task = self.get_task(name)
+
         if new_module is None:
-            if "name" not in entry:
-                entry["name"] = name
-            new_module = Module(entry)
-        for key in entry.keys():
-            setattr(task, key, getattr(new_module, key))
-        self.taskdb.update(task)
+            # Validate updates by constructing a Module
+            # Use a copy to avoid mutating caller's dict
+            entry_for_validation = dict(entry)
+            entry_for_validation.setdefault("name", old_task.name)
+            new_module = Module(entry_for_validation)
+
+        # Apply each attribute update to the existing task
+        for attr_name in entry.keys():
+            if attr_name != "name":  # Never overwrite task.name
+                setattr(old_task, attr_name, getattr(new_module, attr_name))
+
+        # Update task in database (preserves index, uses current task.priority)
+        self.taskdb[old_task.name] = old_task
 
     def add_modules(self, file):
         with open(file, "rb") as fp:
@@ -889,79 +1863,6 @@ class Modprobe:
                 # Allow <module>.key to update an existing configured module:
                 self.update_module(name, entry)
 
-    def _get_searchpath(self, builtindir="datadir"):
-        """
-        Return list of dirs in ``FLUX_MODPROBE_PATH`` if set, o/w returns the
-        default modprobe search path.
-        Args:
-            builtindir (str): base path for builtin/package path. Should
-                be either "datadir" or "libexecdir".
-        """
-        searchpath = []
-        if "FLUX_MODPROBE_PATH" in os.environ:
-            searchpath = filter(
-                lambda s: s and not s.isspace(),
-                os.environ["FLUX_MODPROBE_PATH"].split(":"),
-            )
-        else:
-            pkgdir = conf_builtin_get(builtindir)
-            confdir = conf_builtin_get("confdir")
-            searchpath = [f"{pkgdir}/modprobe", f"{confdir}/modprobe"]
-
-        if "FLUX_MODPROBE_PATH_APPEND" in os.environ:
-            searchpath.extend(
-                filter(
-                    lambda s: s and not s.isspace(),
-                    os.environ["FLUX_MODPROBE_PATH_APPEND"].split(":"),
-                )
-            )
-
-        # return searchpath without duplicates
-        return list(OrderedDict.fromkeys(searchpath))
-
-    def _searchpath_expand(self, name="modprobe", ext="toml"):
-        """
-        Expand searchpath for extension ``ext`` based on configured paths.
-        """
-        files = []
-        for directory in self.searchpath[ext]:
-            self.print(f"checking {directory}/{name}.d/*.{ext}")
-            if Path(directory).exists():
-                files.extend(sorted(glob.glob(f"{directory}/{name}.d/*.{ext}")))
-        return files
-
-    def _get_toml_files(self):
-        """
-        Return all modprobe config toml files found in the following order
-         - Always read ``{fluxdatadir}/modprobe/modprobe.toml``
-         - for dir in self.searchpath: read ``{dir}/modprobe.d/*.toml``
-        """
-        files = []
-        builtin_toml_config = (
-            Path(conf_builtin_get("datadir")) / "modprobe" / "modprobe.toml"
-        )
-        self.print(f"checking {builtin_toml_config}")
-        if builtin_toml_config.exists():
-            files.append(str(builtin_toml_config))
-        files.extend(self._searchpath_expand())
-        return files
-
-    def _get_rc_files(self, name="rc1"):
-        """
-        Return all modprobe rc *.py files found in the following order
-         - Always read ``{fluxdatadir}/modprobe/{name}.py`` (e.g. ``rc1.py``)
-         - for dir in self.searchpath: read ``{dir}/{name}.d/*.py``
-        """
-        files = []
-        builtin_rc_file = (
-            Path(conf_builtin_get("libexecdir")) / "modprobe" / f"{name}.py"
-        )
-        self.print(f"checking {builtin_rc_file}")
-        if builtin_rc_file.exists():
-            files.append(str(builtin_rc_file))
-        files.extend(self._searchpath_expand(name=name, ext="py"))
-        return files
-
     def _update_modules_from_config(self):
         """Update modules using broker config
         Process a [modules] table in config support the following keys:
@@ -981,9 +1882,17 @@ class Modprobe:
 
     def configure_modules(self):
         """
-        Load module configuration from TOML config.
+        Load module configuration from TOML config files.
+
+        Reads all modprobe.toml and modprobe.d/*.toml files from the
+        search path, adding module definitions to the task database.
+        Also applies any module configuration overrides from broker
+        config.
+
+        Returns:
+            self: For method chaining
         """
-        for file in self._get_toml_files():
+        for file in self.loader.get_toml_files():
             self.print(f"loading {file}")
             self.add_modules(file)
 
@@ -1005,64 +1914,38 @@ class Modprobe:
 
     def _solve_tasks_recursive(self, tasks, visited=None, skipped=None):
         """Recursively find all requirements of 'tasks'"""
-
-        if visited is None:
-            visited = set()
-        if skipped is None:
-            skipped = set()
-        result = set()
-        to_visit = [x for x in tasks if x not in visited]
-
-        for name in to_visit:
-            task = self.get_task(name)
-            if task.enabled(self.context):
-                result.add(task.name)
-            else:
-                skipped.add(task.name)
-            visited.add(task.name)
-            if task.requires:
-                rset = self._solve_tasks_recursive(
-                    tasks=task.requires, visited=visited, skipped=skipped
-                )
-                result.update(rset)
-
-        return result
+        # New solver API doesn't expose visited/skipped (private impl detail)
+        # Legacy wrapper for backward compatibility if needed
+        return self.solver.solve_requirements(tasks)
 
     def _process_needs(self, tasks):
         """Remove all tasks in tasks where task.needs is not met"""
-
-        def remove_task_recursive(tasks, task):
-            # When a task is removed, recursively remove tasks that
-            # needed it:
+        result = self.solver.solve_needs(tasks)
+        # The new API returns a new list and doesn't call modprobe.disable().
+        # We need to detect what was removed and disable those tasks.
+        removed = set(tasks) - set(result)
+        for name in removed:
             try:
-                tasks.remove(task.name)
-            except ValueError:
-                # If task.name is not in current set of tasks it may be a
-                # provider, so disable the task instead:
-                self.disable(task.name)
-                return
-            provides_set = set((task.name, *task.provides))
-            for name in tasks:
-                x = self.get_task(name)
-                if not provides_set.isdisjoint(x.needs):
-                    # Task x needs task, remove it
-                    remove_task_recursive(tasks, x)
+                self.taskdb.disable(name)
+            except (ValueError, KeyError):
+                # Task may not exist or may be a provider alias
+                pass
+        return result
 
-        # Iterate over a copy of tasks list, removing tasks for which one
-        # or more "needs" is not satisfied. When removing a task, tasks
-        # that "need" that task are removed (recursively applied)
-        for name in tasks.copy():
-            task = self.get_task(name)
-            for need in task.needs:
-                if not self.taskdb.any_provides(tasks, need):
-                    if name in tasks:
-                        remove_task_recursive(tasks, task)
+    def solve(self, tasks, timing=True, ignore_disabled=False):
+        """
+        Recursively resolve all requirements for the given tasks.
 
-        return tasks
+        Args:
+            tasks: Iterable of task/module names
+            timing: Record timing data (default True)
+            ignore_disabled: Include disabled tasks (default False)
 
-    def solve(self, tasks, timing=True):
+        Returns:
+            List of task names including all recursive requirements
+        """
         t0 = self.timestamp
-        result = self._solve_tasks_recursive(tasks)
+        result = self.solver.solve_requirements(tasks, ignore_disabled=ignore_disabled)
         if timing:
             self.add_timing("solve", t0)
         return result
@@ -1071,77 +1954,45 @@ class Modprobe:
         """Process any task.before by appending this task's name to all
         successor's predecessor list.
         """
-
-        def deps_add_all(name):
-            """Add name as a predecessor to all entries in deps"""
-            for task in [self.get_task(x) for x in deps.keys()]:
-                if "*" not in task.before:
-                    deps[task.name].append(name)
-
-        for name in tasks:
-            task = self.get_task(name)
-            for successor in task.before:
-                if successor == "*":
-                    deps_add_all(task.name)
-                else:
-                    # resolve real successor name:
-                    successor = self.get_task(successor).name
-                    if successor in deps:
-                        deps[successor].append(task.name)
+        return self.solver._process_before(tasks, deps)
 
     def get_deps(self, tasks):
-        """Return dependencies for tasks as dict of names to predecessor list"""
+        """
+        Build execution order precedence graph for tasks.
+
+        Constructs a dict mapping task names to lists of predecessors
+        (tasks that must complete before each task can start). Respects
+        before/after constraints and handles special before=["*"] and
+        after=["*"] cases.
+
+        Args:
+            tasks: Iterable of task names
+
+        Returns:
+            Dict of {task_name: [predecessor_list]} for topological sort
+        """
         t0 = self.timestamp
-        if not isinstance(tasks, set):
-            tasks = set(tasks)
-        deps = {}
-
-        # Ensure tasks set contains all provides and the actual task name
-        # (since presence in the set determines if a task is included in
-        #  the predecessor list below)
-        provides = set()
-        for task in tasks:
-            task = self.get_task(task)
-            provides.add(task.name)
-            provides.update(task.provides)
-        tasks.update(provides)
-
-        for name in tasks:
-            task = self.get_task(name)
-            if "*" in task.after:
-                # Add all tasks to deps (except those that also specify "*"
-                # in their 'after' list)
-                deps[task.name] = [
-                    self.get_task(x).name
-                    for x in tasks
-                    if "*" not in self.get_task(x).after
-                ]
-            else:
-                after_tasks = [self.get_task(x).name for x in task.after]
-                deps[task.name] = [x for x in after_tasks if x in tasks]
-        self._process_before(tasks, deps)
+        deps = self.solver.solve_execution_order(tasks)
         self.add_timing("deps", t0)
-
         return deps
 
     def get_requires(self, tasks, reverse=False):
         """Return dependencies for tasks as dicts of names to dependencies"""
-        deps = {}
-        for name in tasks:
-            task = self.get_task(name)
-            deps[task.name] = list(task.requires)
         if reverse:
-            rdeps = {}
-            for dependent, reqs in deps.items():
-                for req in reqs:
-                    if req not in rdeps:
-                        rdeps[req] = set()
-                    rdeps[req].add(dependent)
-            return rdeps
-        return deps
+            return self.solver.get_reverse_requires(tasks)
+        return self.solver.get_requires(tasks)
 
     def run(self, deps):
-        """Run all tasks in deps in precedence order"""
+        """
+        Execute tasks in parallel respecting precedence constraints.
+
+        Uses ThreadPoolExecutor to run tasks concurrently when their
+        dependencies are satisfied. Tasks are executed in topological
+        order based on the deps precedence graph.
+
+        Args:
+            deps: Dict of {task_name: [predecessors]} from get_deps()
+        """
         t0 = self.timestamp
         sorter = TopologicalSorter(deps)
         sorter.prepare()
@@ -1205,6 +2056,17 @@ class Modprobe:
             setup(self.context)
 
     def read_rcfile(self, name):
+        """
+        Load and execute Python rc files.
+
+        Loads rc Python files from search path (e.g., rc1.py, rc1.d/*.py)
+        and registers @task-decorated functions. Also executes setup()
+        function if present in any loaded module.
+
+        Args:
+            name: RC file basename (e.g., "rc1", "rc3") or absolute path
+                to a .py file
+        """
         # For absolute file path, just add tasks from single file:
         if name.endswith(".py"):
             self.print(f"loading {name}")
@@ -1212,7 +2074,7 @@ class Modprobe:
             return
 
         # O/w, load all rc files in configured search path:
-        for file in self._get_rc_files(name):
+        for file in self.loader.get_rc_files(name):
             self.print(f"loading {file}")
             self._load_file(file)
 
@@ -1229,7 +2091,11 @@ class Modprobe:
     def _set_all_alternatives(self, modules):
         # Set all modules as the current selected alternatives:
         for module in modules:
-            task = self.get_task(module)
+            try:
+                task = self.get_task(module)
+            except ValueError:
+                # Module not in taskdb (e.g., disabled or not configured)
+                continue
             for service in task.provides:
                 self.set_alternative(service, task.name)
 
@@ -1243,9 +2109,16 @@ class Modprobe:
         Raises:
             FileExistsError: Target modules (and all their dependencies)
                 are already loaded, so there is nothing to do.
+
+        Note:
+            This method uses ignore_disabled=True to allow loading modules
+            that are disabled by configuration. This enables explicit loading
+            of non-default alternatives or disabled modules.
         """
         mlist = ModuleList(self.handle)
-        needed_modules = [x for x in self.solve(modules) if x not in mlist]
+        needed_modules = [
+            x for x in self.solve(modules, ignore_disabled=True) if x not in mlist
+        ]
 
         # Ensure explicitly requested modules are the current alternatives
         self._set_all_alternatives(needed_modules)
@@ -1269,66 +2142,7 @@ class Modprobe:
         Returns:
             list: modules that can be safely removed (including original list)
         """
-        dependents = {}
-        for dependent, reqs in dependencies.items():
-            for req in reqs:
-                if req not in dependents:
-                    dependents[req] = set()
-                dependents[req].add(dependent)
-
-        # Start with the items we're told to remove
-        removed_items = set(modules_to_remove)
-        newly_removable = []
-
-        # Keep track of items to check in this iteration
-        modules_to_check = set(modules_to_remove)
-
-        while modules_to_check:
-            next_modules_to_check = set()
-
-            for removed_item in modules_to_check:
-                # Find all dependencies of the removed item
-                # (items it depended on)
-                if removed_item in dependencies:
-                    for dependency in dependencies[removed_item]:
-                        # Skip if this dependency is already being removed
-                        if dependency in removed_items:
-                            continue
-
-                        # Check if this dependency still has other items
-                        # depending on it
-                        remaining_dependents = (
-                            dependents.get(dependency, set()) - removed_items
-                        )
-
-                        # If no remaining dependents, it can be removed
-                        if not remaining_dependents:
-                            removed_items.add(dependency)
-                            newly_removable.append(dependency)
-                            next_modules_to_check.add(dependency)
-
-            modules_to_check = next_modules_to_check
-
-        # Add newly removed items to list of items to remove
-        modules_to_remove.extend(newly_removable)
-
-        # Discard elements from dependents if they are being removed
-        for name in modules_to_remove:
-            for deps in dependents.values():
-                # discard both the name to remove and the real name
-                # of the task in case they are different
-                # (e.g. sched vs sched-simple):
-                deps.discard(name)
-                deps.discard(self.get_task(name).name)
-
-        # Raise an error if any removed modules still have dependents
-        for name in modules_to_remove:
-            if dependents.get(name):
-                raise ValueError(
-                    f"{name} still in use by " + ", ".join(dependents[name])
-                )
-
-        return modules_to_remove
+        return self.solver.solve_removal(dependencies, modules_to_remove)
 
     def _solve_modules_remove(self, modules=None):
         """Solve for a set of currently loaded modules to remove"""
@@ -1387,7 +2201,20 @@ class Modprobe:
             self.add_active_task(task)
 
     def remove(self, modules):
-        """Remove loaded modules"""
+        """
+        Unload modules and any unused dependencies.
+
+        Finds all modules that can be safely removed (no remaining
+        dependents) and unloads them in reverse load order.
+
+        Args:
+            modules: List of module names to remove, or ["all"] to remove
+                all loaded modules
+
+        Raises:
+            ValueError: If a specified module is not loaded or still has
+                active dependents
+        """
         tasks, deps = self._solve_modules_remove(modules)
         [self.get_task(x).set_remove() for x in deps.keys()]
         self.run(deps)
