@@ -154,23 +154,6 @@ class TestTaskDB(unittest.TestCase):
         self.assertEqual(db.get("svc-x").name, "module-a")
         self.assertEqual(db.get("svc-y").name, "module-a")
 
-    def test_set_alternative_no_propagate(self):
-        """Setting alternative with propagate=False only affects one service"""
-        db = TaskDB()
-        task_a = Task("module-a", provides=["svc-x", "svc-y"], priority=10)
-        task_b = Task("module-b", provides=["svc-x", "svc-y"], priority=20)
-
-        db.add(task_a)
-        db.add(task_b)
-
-        # Select module-a for svc-x without propagation
-        db.set_alternative("svc-x", "module-a", propagate=False)
-
-        # Only svc-x should return module-a
-        self.assertEqual(db.get("svc-x").name, "module-a")
-        # svc-y should still return module-b
-        self.assertEqual(db.get("svc-y").name, "module-b")
-
     def test_set_alternative_nonexistent_service(self):
         """Setting alternative for nonexistent service raises"""
         db = TaskDB()
@@ -325,8 +308,8 @@ class TestTaskDB(unittest.TestCase):
         self.assertEqual(db.get("service").name, "low")
 
         # Verify priority was actually bumped above high
-        entry = db._services["service"]["low"]
-        self.assertGreater(entry.priority, 500)
+        task = db.get("low")
+        self.assertGreater(task.priority, 500)
 
     def test_set_alternative_with_disabled(self):
         """set_alternative() works correctly when alternatives are disabled"""
@@ -367,8 +350,8 @@ class TestTaskDB(unittest.TestCase):
         # sched-simple should still win due to priority bump
         self.assertEqual(db.get("feasibility").name, "sched-simple")
 
-    def test_add_does_not_preserve_priority_bump(self):
-        """taskdb.add() on existing task overwrites priority bumps (this is the bug)"""
+    def test_add_preserves_priority_boost(self):
+        """taskdb.add() preserves priority boost (boost modifies task.priority)"""
         from flux.modprobe import Module
 
         db = TaskDB()
@@ -388,16 +371,15 @@ class TestTaskDB(unittest.TestCase):
         db.add(sched_simple)
         db.add(advanced)
 
-        # Set alternative to force sched-simple
+        # Set alternative to force sched-simple (boosts task.priority)
         db.set_alternative("sched", "sched-simple")
         self.assertEqual(db.get("feasibility").name, "sched-simple")
 
-        # Calling add() again on the same task overwrites the priority bump
-        # This is the bug that add_active_task() had to work around
+        # Calling add() again still uses the boosted task.priority
         db.add(sched_simple)
 
-        # Priority bump was lost - advanced-scheduler wins again
-        self.assertEqual(db.get("feasibility").name, "advanced-scheduler")
+        # Priority boost is preserved - sched-simple still wins
+        self.assertEqual(db.get("feasibility").name, "sched-simple")
 
     def test_contains_operator(self):
         """__contains__ enables 'in' operator for existence checks"""

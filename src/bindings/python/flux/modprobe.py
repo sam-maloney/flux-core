@@ -175,20 +175,24 @@ class TaskDB:
     """
     Task database supporting service alternatives and priority-based selection.
 
-    Structure: {service: {task_name: TaskEntry(priority, index, task)}}
+    Structure: {service: {task_name: TaskEntry(index, task)}}
 
     Tasks are stored in a dict-of-dicts structure where each service maps to
     a dict of task names to entries. Each entry is a TaskEntry namedtuple with
-    priority (int), insertion index (int), and task object. When selecting a
-    task for a service, the highest priority enabled task is chosen. If no
-    enabled tasks exist, the highest priority task overall is returned
-    regardless of enabled status.
+    insertion index (int) and task object. Priority comes from task.priority.
+
+    Priority Model:
+    - task.priority is the single source of truth
+    - set_alternative() boosts task.priority to ensure the task will be
+      the highest priority alternative. This affects all services the
+      task provides
+    - Priority updates via config/TOML set task.priority globally
     """
 
-    TaskEntry = namedtuple("TaskEntry", ["priority", "index", "task"])
+    TaskEntry = namedtuple("TaskEntry", ["index", "task"])
 
     def __init__(self):
-        # {service: {task_name: TaskEntry(priority, index, task)}}
+        # {service: {task_name: TaskEntry(index, task)}}
         self._services = defaultdict(dict)
         self._insertion_counter = 0
 
@@ -197,7 +201,7 @@ class TaskDB:
         if index is None:
             index = self._insertion_counter
             self._insertion_counter += 1
-        entry = self.TaskEntry(task.priority, index, task)
+        entry = self.TaskEntry(index, task)
         for service in (task.name, *task.provides):
             self._services[service][task.name] = entry
 
@@ -221,8 +225,8 @@ class TaskDB:
         }
         if not not_disabled:
             # Return highest priority task even if disabled
-            return max(tasks.values(), key=lambda e: (e.priority, e.index)).task
-        return max(not_disabled.values(), key=lambda e: (e.priority, e.index)).task
+            return max(tasks.values(), key=lambda e: (e.task.priority, e.index)).task
+        return max(not_disabled.values(), key=lambda e: (e.task.priority, e.index)).task
 
     def get_all(self, service: str) -> List["Task"]:
         """
@@ -239,7 +243,9 @@ class TaskDB:
             return []
         tasks = self._services[service]
         # Sort by (priority, index) ascending
-        sorted_entries = sorted(tasks.values(), key=lambda e: (e.priority, e.index))
+        sorted_entries = sorted(
+            tasks.values(), key=lambda e: (e.task.priority, e.index)
+        )
         return [e.task for e in sorted_entries]
 
     def get_entry(self, service: str, task_name: str):
@@ -262,8 +268,14 @@ class TaskDB:
             raise ValueError(f"task {task_name} does not provide {service}")
         return self._services[service][task_name]
 
-    def set_alternative(self, service: str, name: str, propagate: bool = True) -> None:
-        """Select a specific alternative 'name' for service"""
+    def set_alternative(self, service: str, name: str) -> None:
+        """
+        Select a specific alternative 'name' for service.
+
+        Boosts task.priority above all other tasks providing this service.
+        Since priority is global to the task, this affects all services
+        the task provides.
+        """
         if service not in self._services:
             raise ValueError(f"no such service {service}")
         if name not in self._services[service]:
@@ -275,16 +287,11 @@ class TaskDB:
             return
 
         # Find max priority and bump selected alternative above it
-        max_priority = max(e.priority for e in tasks.values())
+        max_priority = max(e.task.priority for e in tasks.values())
         entry = tasks[name]
-        tasks[name] = self.TaskEntry(max_priority + 1, entry.index, entry.task)
 
-        # Propagate to other services this task provides
-        if propagate:
-            task = entry.task
-            for other_service in task.provides:
-                if other_service != service:
-                    self.set_alternative(other_service, name, propagate=False)
+        # Update task.priority - this affects all services the task provides
+        entry.task.priority = max_priority + 1
 
     def disable(self, service: str) -> None:
         """Disable all tasks providing this task/module/service"""
@@ -317,9 +324,6 @@ class TaskDB:
         """
         Add or update task in database (enables dict-like assignment).
 
-        Always succeeds - adds task if new, updates if exists. This is the
-        idiomatic Python way to handle upsert operations, similar to dict.
-
         Example:
             taskdb["kvs"] = kvs_task  # Add or update
 
@@ -335,7 +339,7 @@ class TaskDB:
         if name != task.name:
             raise ValueError(f"Key '{name}' doesn't match task.name '{task.name}'")
 
-        # Check if task exists in any service
+        # Check if task exists
         found = False
         for service in self._services:
             if task.name in self._services[service]:
@@ -343,7 +347,6 @@ class TaskDB:
                 break
 
         if not found:
-            # Task doesn't exist yet, add it
             self.add(task)
             return
 
@@ -351,19 +354,16 @@ class TaskDB:
         for service in (task.name, *task.provides):
             if service in self._services and task.name in self._services[service]:
                 old_entry = self._services[service][task.name]
-                # Use task.priority directly (dict-like semantics: replacement)
                 self._services[service][task.name] = self.TaskEntry(
-                    task.priority,
                     old_entry.index,
                     task,
                 )
             else:
-                # New service added to provides, add entry with preserved index
-                # Get the insertion index from any existing service
+                # New service added to provides
                 for existing_service in self._services:
                     if task.name in self._services[existing_service]:
                         old_entry = self._services[existing_service][task.name]
-                        entry = self.TaskEntry(task.priority, old_entry.index, task)
+                        entry = self.TaskEntry(old_entry.index, task)
                         self._services[service][task.name] = entry
                         break
 
@@ -446,10 +446,9 @@ class DependencySolver:
 
         if viable:
             # Return highest priority viable task
-            # Use TaskEntry priority (respects set_alternative bumps), not Task.priority
             def priority_key(t):
                 entry = self.taskdb.get_entry(service, t.name)
-                return (entry.priority, entry.index)
+                return (entry.task.priority, entry.index)
 
             return max(viable, key=priority_key)
 
@@ -1575,8 +1574,15 @@ class Modprobe:
             if "name" not in entry:
                 entry["name"] = name
             new_module = Module(entry)
+
+        # Copy attributes from new_module to task, but never overwrite task.name
+        # (name might be a service name, not the actual task name)
         for key in entry.keys():
+            if key == "name":
+                continue
             setattr(task, key, getattr(new_module, key))
+
+        # Update the task in database (preserves index, uses current task.priority)
         self.taskdb[task.name] = task
 
     def add_modules(self, file):
