@@ -7,6 +7,7 @@ from copy import deepcopy
 import json
 import os
 import re
+import subprocess
 
 docker_run_checks = "src/test/docker/docker-run-checks.sh"
 
@@ -30,7 +31,6 @@ DEFAULT_MULTIARCH_PLATFORMS = {
         "when": on_master_or_tag,
         "suffix": " - arm64",
         "command_args": "--install-only ",
-        "timeout_minutes": 90,
         "runner": "ubuntu-24.04-arm",
     },
     "linux/amd64": {"when": lambda _: True, "runner": "ubuntu-latest"},
@@ -42,6 +42,7 @@ class BuildMatrix:
         self.matrix = []
         self.branch = None
         self.tag = None
+        self.rebuild_distros = set()
 
         #  Set self.branch or self.tag based on GITHUB_REF
         if "GITHUB_REF" in os.environ:
@@ -52,6 +53,60 @@ class BuildMatrix:
             match = re.search("^refs/tags/(.*)", self.ref)
             if match:
                 self.tag = match.group(1)
+
+        # Determine which distros need rebuilding based on changed files
+        self._detect_rebuild_distros()
+
+    def _detect_rebuild_distros(self):
+        """
+        Detect which distros need rebuilding using git diff and
+        src/test/docker/testenv-affected-distros.sh. Uses the same logic as
+        docker-run-checks.sh: diff against the last merge commit.
+        """
+        self.rebuild_all = False
+
+        try:
+            # Get the last merge commit. On master, this is the most recent
+            # PR that was merged. On a PR branch, this is where it diverged
+            # from master (assuming master uses merge commits).
+            result = subprocess.run(
+                ["git", "log", "--merges", "-n1", "--format=%H", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            last_merge = result.stdout.strip()
+
+            if not last_merge:
+                # No merge commits found, assume no rebuilds needed
+                self.rebuild_distros = set()
+                return
+
+            # Get changed files since the last merge
+            result = subprocess.run(
+                ["git", "diff", "--name-only", last_merge, "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            changed_files = result.stdout
+
+            # Pass changed files to testenv-affected-distros.sh
+            result = subprocess.run(
+                ["src/test/docker/testenv-affected-distros.sh"],
+                input=changed_files,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.rebuild_distros = (
+                set(result.stdout.strip().split("\n"))
+                if result.stdout.strip()
+                else set()
+            )
+        except subprocess.CalledProcessError:
+            # If git commands fail, assume no rebuilds needed
+            self.rebuild_distros = set()
 
     def create_docker_tag(self, image, env, command, platform):
         """Create docker tag string if this is master branch or a tag"""
@@ -80,7 +135,7 @@ class BuildMatrix:
         recheck=True,
         platform=None,
         command_args="",
-        timeout_minutes=60,
+        timeout_minutes=None,
         runner="ubuntu-latest",
     ):
         """Add a build to the matrix.include array"""
@@ -89,6 +144,15 @@ class BuildMatrix:
         # NOTE: ensure we copy the dict rather than modify, re-used dicts can cause
         #       overwriting
         env = dict(env) if env is not None else {}
+
+        # Determine timeout based on build type and whether distro needs rebuilding
+        if timeout_minutes is None:
+            if coverage:
+                timeout_minutes = 45
+            elif self.rebuild_all or image in self.rebuild_distros:
+                timeout_minutes = 90
+            else:
+                timeout_minutes = 30
 
         # hwloc tries to look for opengl devices  by connecting to a port that might
         # sometimes be an x11 port, but more often for us is munge, turn it off
@@ -153,13 +217,17 @@ class BuildMatrix:
         for p, args in platforms.items():
             if args["when"](self):
                 suffix = args.get("suffix", default_suffix)
+                # add timeout_minutes to kwargs only if in args. This
+                # avoids overriding the add_build() default timeout with
+                # None if timeout not explicitly set
+                if "timeout_minutes" in args:
+                    kwargs["timeout_minutes"] = args["timeout_minutes"]
                 self.add_build(
                     name + suffix,
                     platform=p,
                     docker_tag=docker_tag,
                     image=image if image is not None else name,
                     command_args=args.get("command_args", ""),
-                    timeout_minutes=args.get("timeout_minutes"),
                     runner=args["runner"],
                     **kwargs,
                 )
