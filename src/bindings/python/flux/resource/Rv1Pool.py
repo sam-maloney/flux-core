@@ -55,12 +55,13 @@ from flux.resource.Rv1Set import Rv1Set
 
 
 class ResourceRequest:
-    """Parsed resource request extracted from a V1 jobspec.
+    """Parsed resource request extracted from a jobspec.
 
     Returned by :meth:`Rv1Pool.parse_resource_request` and stored on
     :class:`~flux.scheduler.PendingJob`.  Passed to
     :meth:`Rv1Pool.alloc` so that the pool does not need to
-    re-parse jobspec on every scheduling pass.
+    re-parse jobspec on every scheduling pass.  Node and slot counts carry
+    RFC 14 ranges (min/max).
 
     Attributes:
         node_count (ResourceCount | None): RFC 14 node count (scaled by
@@ -76,6 +77,10 @@ class ResourceRequest:
         duration (float): Walltime in seconds; 0.0 means unlimited.
         constraint: RFC 31 constraint expression (dict) or None.
         exclusive (bool): Whole-node exclusive allocation.
+        jobspec (dict): The raw jobspec dict from which this request was parsed.
+            Available for reading site-specific hints from
+            ``attributes.system`` that the standard parser does not extract,
+            or for forwarding the full jobspec to an external resource service.
         nnodes (int): Minimum node count; derived from *node_count*.
         nnodes_max (int | None): Maximum node count; ``None`` for unbounded.
         nslots (int): Minimum total slot count; derived from *slot_count* and
@@ -91,6 +96,7 @@ class ResourceRequest:
         "duration",
         "constraint",
         "exclusive",
+        "jobspec",
     )
 
     def __init__(
@@ -102,6 +108,7 @@ class ResourceRequest:
         duration,
         constraint,
         exclusive,
+        jobspec=None,
     ):
         self.node_count = node_count
         self.slot_count = slot_count
@@ -110,6 +117,7 @@ class ResourceRequest:
         self.duration = duration
         self.constraint = constraint
         self.exclusive = exclusive
+        self.jobspec = jobspec
 
     @property
     def nnodes(self):
@@ -241,6 +249,7 @@ class ResourceRequest:
             float(duration),
             constraint,
             exclusive,
+            jobspec,
         )
 
     @property
