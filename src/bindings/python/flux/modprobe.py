@@ -1569,21 +1569,34 @@ class Modprobe:
         return name in self.taskdb
 
     def update_module(self, name, entry, new_module=None):
-        task = self.get_task(name)
+        """
+        Update attributes of an existing module/task.
+
+        Args:
+            name: Task name or service name to look up
+            entry: Dict of attribute updates to apply
+            new_module: Optional pre-constructed Module for attribute source
+
+        Note: 'name' may be a service name (e.g., "feasibility") rather than
+        the actual task name (e.g., "sched-simple"), so we never overwrite
+        task.name during updates.
+        """
+        old_task = self.get_task(name)
+
         if new_module is None:
-            if "name" not in entry:
-                entry["name"] = name
-            new_module = Module(entry)
+            # Validate updates by constructing a Module
+            # Use a copy to avoid mutating caller's dict
+            entry_for_validation = dict(entry)
+            entry_for_validation.setdefault("name", old_task.name)
+            new_module = Module(entry_for_validation)
 
-        # Copy attributes from new_module to task, but never overwrite task.name
-        # (name might be a service name, not the actual task name)
-        for key in entry.keys():
-            if key == "name":
-                continue
-            setattr(task, key, getattr(new_module, key))
+        # Apply each attribute update to the existing task
+        for attr_name in entry.keys():
+            if attr_name != "name":  # Never overwrite task.name
+                setattr(old_task, attr_name, getattr(new_module, attr_name))
 
-        # Update the task in database (preserves index, uses current task.priority)
-        self.taskdb[task.name] = task
+        # Update task in database (preserves index, uses current task.priority)
+        self.taskdb[old_task.name] = old_task
 
     def add_modules(self, file):
         with open(file, "rb") as fp:
