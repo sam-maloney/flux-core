@@ -89,6 +89,7 @@ TESTSCRIPTS = \
 	t0036-broker-rundir.t \
 	t0037-content-files-checkpoint.t \
 	t0038-rreq-reader.t \
+	t0039-shape-parser.t \
 	t0025-broker-state-machine.t \
 	t0027-broker-groups.t \
 	t0040-flux-sproc.t \
@@ -252,6 +253,7 @@ TESTSCRIPTS = \
 	t2715-python-cli-cancel.t \
 	t2716-python-cli-batch-conf.t \
 	t2717-python-cli-plugins.t \
+	t2718-python-cli-job-shape.t \
 	t2720-python-cli-multi-prog.t \
 	t2800-jobs-cmd-multiuser.t \
 	t2800-jobs-recursive.t \
@@ -340,6 +342,7 @@ TESTSCRIPTS = \
 	python/t0042-job-manager-alloc-cache.py \
 	python/t0043-sdexec-map.py \
 	python/t0043-scheduler-pool.py \
+	python/t0045-job-shape-parser.py \
 	python/t0100-modprobe.py \
 	python/t1000-service-add-remove.py
 
