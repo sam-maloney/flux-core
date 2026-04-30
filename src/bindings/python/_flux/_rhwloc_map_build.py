@@ -23,6 +23,8 @@ typedef struct rhwloc_map rhwloc_map_t;
 rhwloc_map_t *rhwloc_map_create (const char *xml);
 void          rhwloc_map_destroy (rhwloc_map_t *m);
 
+int  rhwloc_map_count_type (rhwloc_map_t *m, const char *typestr);
+
 int  rhwloc_map_cores (rhwloc_map_t *m,
                        const char *cores,
                        char **cpus_out,

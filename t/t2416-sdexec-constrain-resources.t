@@ -144,7 +144,7 @@ from flux.sdexec.map import HwlocMapper
 
 class MemoryHighMapper(HwlocMapper):
     """Mapper that adds MemoryHigh via finalize_properties."""
-    def finalize_properties(self, properties, R):
+    def finalize_properties(self, properties, R, extra_properties=None):
         properties["MemoryHigh"] = "1G"
         return properties
 PYEOF
@@ -202,6 +202,89 @@ test_expect_success 'finalize_properties: default mapper does not set MemoryHigh
 	result=$(flux run -n1 -c1 ./get_unit_prop.sh MemoryHigh) &&
 	test_debug "echo MemoryHigh=$result" &&
 	test "$result" = "infinity"
+'
+
+#
+# MemoryMax scaling: exec.sdexec-properties.MemoryMax is scaled by the
+# ratio of allocated to total processing units.
+#
+test_expect_success 'MemoryMax scaling: configure exec.sdexec-properties.MemoryMax' '
+	cat >config/config.toml <<-EOT &&
+	[systemd]
+	enable = true
+	sdexec-debug = true
+	[exec]
+	service = "sdexec"
+	sdexec-constrain-resources = true
+	[exec.sdexec-properties]
+	MemoryMax = "95%"
+	EOT
+	flux config reload
+'
+
+test_expect_success 'MemoryMax scaling: 1-core job has MemoryMax set' '
+	result=$(flux run -n1 -c1 ./get_unit_prop.sh MemoryMax) &&
+	test_debug "echo 1-core MemoryMax=$result" &&
+	test "$result" != "infinity" &&
+	test "$result" -gt 0
+'
+
+test_expect_success MULTICORE 'MemoryMax scaling: full-node job has higher MemoryMax than 1-core job' '
+	max1=$(flux run -n1 -c1 ./get_unit_prop.sh MemoryMax) &&
+	maxall=$(flux run -n1 -c${ncores} ./get_unit_prop.sh MemoryMax) &&
+	test_debug "echo 1-core MemoryMax=$max1, ${ncores}-core MemoryMax=$maxall" &&
+	test "$maxall" -gt "$max1"
+'
+
+test_expect_success 'MemoryMax scaling: revert to default config' '
+	cat >config/config.toml <<-EOT &&
+	[systemd]
+	enable = true
+	sdexec-debug = true
+	[exec]
+	service = "sdexec"
+	sdexec-constrain-resources = true
+	EOT
+	flux config reload &&
+	test "$(flux run -n1 -c1 ./get_unit_prop.sh MemoryMax)" = "infinity"
+'
+
+#
+# MemoryMax with an absolute value: an all-cores job receives the full configured
+# value because alloc_pus/total_pus == 1.
+#
+test_expect_success 'MemoryMax absolute: configure exec.sdexec-properties.MemoryMax as 8G' '
+	cat >config/config.toml <<-EOT &&
+	[systemd]
+	enable = true
+	sdexec-debug = true
+	[exec]
+	service = "sdexec"
+	sdexec-constrain-resources = true
+	[exec.sdexec-properties]
+	MemoryMax = "8G"
+	EOT
+	flux config reload
+'
+
+test_expect_success 'MemoryMax absolute: all-cores job MemoryMax equals full configured value' '
+	maxall=$(flux run -n1 -c${ncores} ./get_unit_prop.sh MemoryMax) &&
+	test_debug "echo all-cores MemoryMax=$maxall" &&
+	expected=$((8 * 1024 * 1024 * 1024)) &&
+	test "$maxall" = "$expected"
+'
+
+test_expect_success 'MemoryMax absolute: revert to default config' '
+	cat >config/config.toml <<-EOT &&
+	[systemd]
+	enable = true
+	sdexec-debug = true
+	[exec]
+	service = "sdexec"
+	sdexec-constrain-resources = true
+	EOT
+	flux config reload &&
+	test "$(flux run -n1 -c1 ./get_unit_prop.sh MemoryMax)" = "infinity"
 '
 
 #

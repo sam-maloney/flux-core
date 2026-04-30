@@ -61,6 +61,7 @@ class SdexecMapModule(BrokerModule):
         self._mapper = None
         self._mapper_class = None
         self._mapper_searchpath = None
+        self._sdexec_props = None
         self._requests = 0
 
     def _init_mapper(self):
@@ -97,6 +98,7 @@ class SdexecMapModule(BrokerModule):
 
         self._mapper_searchpath = searchpath
         self._mapper = cls(self._xml, rank)
+        self._sdexec_props = self.handle.conf_get("exec.sdexec-properties", default={})
 
     @request_handler("lookup")
     def lookup(self, msg):
@@ -113,7 +115,9 @@ class SdexecMapModule(BrokerModule):
         try:
             if self._mapper is None:
                 self._init_mapper()
-            result = self._mapper.map(msg.payload["R"])
+            result = self._mapper.map(
+                msg.payload["R"], extra_properties=self._sdexec_props
+            )
             self._requests += 1
             self.handle.respond(msg, result)
         except OSError as exc:
@@ -135,6 +139,7 @@ class SdexecMapModule(BrokerModule):
             self._mapper = None
             self._mapper_class = None
             self._mapper_searchpath = None
+            self._sdexec_props = None
             self.handle.respond(msg)
         except Exception as exc:
             self.log.error(f"config-reload failed: {exc}")

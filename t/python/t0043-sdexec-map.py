@@ -12,6 +12,7 @@
 import errno
 import io
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -425,14 +426,16 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that adds new properties."""
 
         class AccountingMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 properties.update(
                     {
                         "CPUAccounting": "true",
                         "MemoryAccounting": "true",
                     }
                 )
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = AccountingMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0"))
@@ -450,10 +453,12 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that modifies existing properties."""
 
         class OverrideMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Override CPU allocation to a fixed value
                 properties["AllowedCPUs"] = "0"
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = OverrideMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0-1"))
@@ -466,12 +471,14 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that adds properties conditionally based on R."""
 
         class ConditionalMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Add TasksMax only if DeviceAllow property is present (GPUs allocated)
                 if "DeviceAllow" in properties:
                     properties["TasksMax"] = "1"
                 # Call super to get default DevicePolicy behavior
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = ConditionalMapper(HWLOC_XML)
 
@@ -496,10 +503,12 @@ class TestFinalizeProperties(unittest.TestCase):
         """Test mapper that removes properties."""
 
         class FilterMapper(HwlocMapper):
-            def finalize_properties(self, properties, R):
+            def finalize_properties(self, properties, R, extra_properties=None):
                 # Remove memory constraints
                 properties.pop("AllowedMemoryNodes", None)
-                return super().finalize_properties(properties, R)
+                return super().finalize_properties(
+                    properties, R, extra_properties=extra_properties
+                )
 
         mapper = FilterMapper(HWLOC_XML)
         result = mapper.map(make_R(cores="0"))
@@ -525,6 +534,192 @@ class TestFinalizeProperties(unittest.TestCase):
         self.assertIn("AllowedCPUs", result)
         self.assertIn("AllowedMemoryNodes", result)
         self.assertEqual(result["DevicePolicy"], "closed")
+
+
+class TestParseSize(unittest.TestCase):
+    """Test the _parse_size() helper."""
+
+    def setUp(self):
+        import flux.sdexec.map as m
+
+        self.parse = m._parse_size
+
+    def test_bytes(self):
+        value, is_pct = self.parse("1024")
+        self.assertAlmostEqual(value, 1024)
+        self.assertFalse(is_pct)
+
+    def test_suffix_K(self):
+        value, is_pct = self.parse("4K")
+        self.assertAlmostEqual(value, 4 * 1024)
+        self.assertFalse(is_pct)
+
+    def test_suffix_M(self):
+        value, is_pct = self.parse("512M")
+        self.assertAlmostEqual(value, 512 * 1024**2)
+        self.assertFalse(is_pct)
+
+    def test_suffix_G(self):
+        value, is_pct = self.parse("8G")
+        self.assertAlmostEqual(value, 8 * 1024**3)
+        self.assertFalse(is_pct)
+
+    def test_suffix_lowercase(self):
+        value, is_pct = self.parse("4g")
+        self.assertAlmostEqual(value, 4 * 1024**3)
+        self.assertFalse(is_pct)
+
+    def test_percent(self):
+        value, is_pct = self.parse("50%")
+        self.assertAlmostEqual(value, 50.0)
+        self.assertTrue(is_pct)
+
+    def test_percent_fractional(self):
+        value, is_pct = self.parse("33.3%")
+        self.assertAlmostEqual(value, 33.3)
+        self.assertTrue(is_pct)
+
+    def test_infinity(self):
+        value, is_pct = self.parse("infinity")
+        self.assertTrue(math.isinf(value))
+        self.assertFalse(is_pct)
+
+    def test_infinity_uppercase(self):
+        value, is_pct = self.parse("INFINITY")
+        self.assertTrue(math.isinf(value))
+
+    def test_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("not-a-size")
+
+    def test_invalid_percent_raises(self):
+        with self.assertRaises(ValueError):
+            self.parse("x%")
+
+
+class TestHwlocMapperMemoryMax(unittest.TestCase):
+    """Test MemoryMax scaling in HwlocMapper.finalize_properties.
+
+    HWLOC_XML topology: 2 logical cores, 2 PUs each = 4 total PUs.
+      core 0 -> AllowedCPUs "0-1" (2 PUs)
+      core 1 -> AllowedCPUs "2-3" (2 PUs)
+      both   -> AllowedCPUs "0-3" (4 PUs)
+    """
+
+    def setUp(self):
+        self.mapper = HwlocMapper(HWLOC_XML)
+
+    def tearDown(self):
+        del self.mapper
+
+    def test_absolute_scaled(self):
+        """Absolute MemoryMax is scaled by alloc/total PU ratio."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"MemoryMax": "8G"}
+        )
+        # 2 of 4 PUs -> ratio 0.5 -> int(8G * 0.5)
+        self.assertEqual(result["MemoryMax"], str(int(8 * 1024**3 * 0.5)))
+
+    def test_percent_scaled_and_rounded(self):
+        """Percentage MemoryMax is scaled and rounded to nearest integer percent."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"MemoryMax": "95%"}
+        )
+        # round(95 * 2/4) = round(47.5) = 48 — exercises rounding
+        self.assertEqual(result["MemoryMax"], "48%")
+
+    def test_all_cores_full_value(self):
+        """MemoryMax equals the full configured value when all cores allocated."""
+        result = self.mapper.map(
+            make_R(cores="0-1"), extra_properties={"MemoryMax": "8G"}
+        )
+        # 4 of 4 PUs -> ratio 1.0
+        self.assertEqual(result["MemoryMax"], str(int(8 * 1024**3)))
+
+    def test_no_extra_properties(self):
+        """MemoryMax is not set when extra_properties is None."""
+        result = self.mapper.map(make_R(cores="0"))
+        self.assertNotIn("MemoryMax", result)
+
+    def test_missing_memory_max_key(self):
+        """MemoryMax is not set when key is absent from extra_properties."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"CPUAccounting": "true"}
+        )
+        self.assertNotIn("MemoryMax", result)
+
+    def test_unparsable_value_ignored(self):
+        """Unparsable MemoryMax value is silently ignored."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"MemoryMax": "not-a-size"}
+        )
+        self.assertNotIn("MemoryMax", result)
+
+    def test_infinity_not_scaled(self):
+        """infinity MemoryMax is not returned; caller-set value remains."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"MemoryMax": "infinity"}
+        )
+        self.assertNotIn("MemoryMax", result)
+
+    def test_no_allowed_cpus_no_scaling(self):
+        """MemoryMax is not set when AllowedCPUs is absent from properties."""
+
+        class NoCoresMapper(HwlocMapper):
+            def map_cores(self, cores):
+                return {}
+
+        mapper = NoCoresMapper(HWLOC_XML)
+        result = mapper.map(make_R(cores="0"), extra_properties={"MemoryMax": "8G"})
+        self.assertNotIn("MemoryMax", result)
+
+    def test_plain_bytes_scaled(self):
+        """Plain byte count MemoryMax (no suffix) is scaled by alloc/total PU ratio."""
+        result = self.mapper.map(
+            make_R(cores="0"), extra_properties={"MemoryMax": "4096"}
+        )
+        # 2 of 4 PUs -> int(4096 * 0.5) = 2048
+        self.assertEqual(result["MemoryMax"], "2048")
+
+    def test_multiple_props_scaled(self):
+        """MemoryHigh, MemoryMax, and MemorySwapMax are all scaled in one call."""
+        result = self.mapper.map(
+            make_R(cores="0"),
+            extra_properties={
+                "MemoryMax": "8G",
+                "MemoryHigh": "6G",
+                "MemorySwapMax": "4G",
+            },
+        )
+        # 2 of 4 PUs -> ratio 0.5
+        self.assertEqual(result["MemoryMax"], str(int(8 * 1024**3 * 0.5)))
+        self.assertEqual(result["MemoryHigh"], str(int(6 * 1024**3 * 0.5)))
+        self.assertEqual(result["MemorySwapMax"], str(int(4 * 1024**3 * 0.5)))
+
+    def test_protection_props_not_scaled(self):
+        """MemoryMin and MemoryLow are not scaled (they are protection, not cap, properties)."""
+        result = self.mapper.map(
+            make_R(cores="0"),
+            extra_properties={"MemoryMin": "10%", "MemoryLow": "20%"},
+        )
+        self.assertNotIn("MemoryMin", result)
+        self.assertNotIn("MemoryLow", result)
+
+    def test_extra_properties_forwarded_to_finalize(self):
+        """ResourceMapper.map() passes extra_properties to finalize_properties."""
+        received = {}
+
+        class CapturingMapper(ResourceMapper):
+            def map_cores(self, cores):
+                return {"AllowedCPUs": cores}
+
+            def finalize_properties(self, properties, R, extra_properties=None):
+                received["extra"] = extra_properties
+                return properties
+
+        ep = {"MemoryMax": "4G"}
+        CapturingMapper().map(make_R(cores="0"), extra_properties=ep)
+        self.assertEqual(received["extra"], ep)
 
 
 class TestMain(unittest.TestCase):
