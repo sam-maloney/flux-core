@@ -202,7 +202,7 @@ int rundir_create (attr_t *attrs,
         do_cleanup = false;
     }
 
-    /*  Ensure created or existing directory is writeable:
+    /*  Ensure created or existing directory is writable:
      */
     if (rundir_checkdir (dirpath, error) < 0)
         goto done;
