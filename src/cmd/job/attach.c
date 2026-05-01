@@ -1101,13 +1101,18 @@ static void fetch_job_queue (struct attach_ctx *ctx)
         flux_future_destroy (f);
 }
 
-static const char *attach_notify_msg (struct attach_ctx *ctx,
-                                      struct attach_event *event)
+/* Get the base status message for the current job state.
+ * Returns a clean message without decorations (e.g., queue info).
+ * This is the "base truth" of what state the job is in.
+ */
+static const char *get_base_status_msg (struct attach_ctx *ctx,
+                                        struct attach_event *event)
 {
     const char *msg;
     int severity;
 
     if (!event) {
+        /* Timer callback - return saved base message */
         msg = ctx->status_msg;
     }
     else if (streq (event->name, "submit")) {
@@ -1161,6 +1166,47 @@ static const char *attach_notify_msg (struct attach_ctx *ctx,
     return msg;
 }
 
+/* Build the full statusline message by adding decorations/annotations
+ * to the base message. Decorations include queue status, etc.
+ *
+ * This function is called on every statusline update and builds a fresh
+ * message, making it easy to add/remove decorations dynamically.
+ *
+ * Returns the decorated message, which may point to buf if decorations
+ * were added, or base_msg if no decorations are needed.
+ */
+static const char *build_statusline_msg (struct attach_ctx *ctx,
+                                         const char *base_msg,
+                                         char *buf,
+                                         size_t buf_size)
+{
+    const char *msg = base_msg;
+
+    /* Add queue stopped annotation if:
+     * 1. The queue is currently stopped
+     * 2. The job is waiting for resources (the relevant state)
+     */
+    if (ctx->queue_stopped
+        && ctx->queue
+        && strstarts (base_msg, "waiting for resources")) {
+        int n = snprintf (buf,
+                         buf_size,
+                         "%s (%s queue stopped)",
+                         base_msg,
+                         ctx->queue);
+        if (n > 0 && n < buf_size)
+            msg = buf;
+    }
+
+    /* Future decorations can be added here, e.g.:
+     * - Dependency information: "waiting for resources (dep: jobid)"
+     * - Priority info: "waiting for resources (priority: 100)"
+     * - Expected start time: "waiting for resources (ETA: 5m)"
+     */
+
+    return msg;
+}
+
 static void attach_notify (struct attach_ctx *ctx,
                            struct attach_event *event,
                            double ts)
@@ -1172,16 +1218,17 @@ static void attach_notify (struct attach_ctx *ctx,
         int dt = ts - ctx->timestamp_zero;
         int width = 80;
         struct winsize w;
-        char buf[64];
-        const char *msg;
+        char buf[128];
+        const char *base_msg;
+        const char *display_msg;
         char *msgcpy;
 
-        if (!(msg = attach_notify_msg (ctx, event)))
+        /* Get the base status message (clean, no decorations) */
+        if (!(base_msg = get_base_status_msg (ctx, event)))
             return;
 
-        if (strstarts (msg, "waiting for resources")) {
-            /*  Fetch job queue so queue status can be checked
-             */
+        /* If waiting for resources, fetch/update queue status periodically */
+        if (strstarts (base_msg, "waiting for resources")) {
             if (!ctx->queue) {
                 fetch_job_queue (ctx);
             }
@@ -1190,21 +1237,14 @@ static void attach_notify (struct attach_ctx *ctx,
                 ctx->last_queue_update = dt;
                 fetch_queue_status (ctx);
             }
-            /*  Amend status if queue is stopped:
-             */
-            if (ctx->queue_stopped) {
-                if (snprintf (buf,
-                              sizeof (buf),
-                              "%s (%s queue stopped)",
-                              msg,
-                              ctx->queue) < sizeof (buf))
-                    msg = buf;
-            }
         }
 
+        /* Build the full display message with decorations */
+        display_msg = build_statusline_msg (ctx, base_msg, buf, sizeof (buf));
+
+        /* Display the statusline if active */
         if (ctx->statusline) {
-            /* Adjust width of status so timer is right justified:
-             */
+            /* Adjust width of status so timer is right justified */
             if (ioctl(0, TIOCGWINSZ, &w) == 0)
                 width = w.ws_col;
             width -= 10 + strlen (ctx->jobid) + 10;
@@ -1213,15 +1253,16 @@ static void attach_notify (struct attach_ctx *ctx,
                      "\rflux-job: %s %-*s %02d:%02d:%02d\r",
                      ctx->jobid,
                      width,
-                     msg,
+                     display_msg,
                      dt/3600,
                      (dt/60) % 60,
                      dt % 60);
         }
 
-        /*  Save current statusline message for future callbacks:
+        /* Save only the base message (no decorations) for future callbacks.
+         * This ensures we always have a clean starting point.
          */
-        if ((msgcpy = strdup (msg))) {
+        if ((msgcpy = strdup (base_msg))) {
             free (ctx->status_msg);
             ctx->status_msg = msgcpy;
         }
