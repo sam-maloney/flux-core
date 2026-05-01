@@ -95,6 +95,48 @@ test_expect_success NO_CHAIN_LINT 'attach: --show-status notes stopped named que
 	flux config load </dev/null &&
 	flux queue status
 '
+test_expect_success NO_CHAIN_LINT 'attach: --show-status does not duplicate queue stopped message' '
+	flux config load <<-EOF &&
+	[queues.a]
+	EOF
+	flux queue stop --verbose --all &&
+	jobid=$(flux submit -q a hostname) &&
+	$runpty -f asciicast -o dup-check.out \
+		flux job attach --show-status $jobid &
+	pid=$! &&
+	waitfile.lua -v -t 15 -p "a queue stopped" dup-check.out &&
+	sleep 3 &&
+	flux queue start --all &&
+	wait $pid &&
+	flux config load </dev/null &&
+	test_must_fail grep "queue stopped.*queue stopped" dup-check.out
+'
+test_expect_success 'attach: --show-status clears queue stopped when queue starts' '
+	flux config load <<-EOF &&
+	[queues.test]
+	EOF
+	test_when_finished "flux config load </dev/null" &&
+	flux queue stop --verbose --all &&
+	flux resource drain 0-3 &&
+	test_when_finished "flux resource undrain 0-3" &&
+	jobid=$(flux submit -q test hostname) &&
+	cat >clear-stopped-expect.json <<-EOF &&
+	[
+	    {
+	      "expect": "test queue stopped",
+              "command": "flux queue start --all"
+            },
+	    {
+              "expect": "waiting for resources\\\\s+00:",
+              "exit": true
+            }
+	]
+	EOF
+	$runpty -f asciicast -o clear-stopped.out \
+		--expect clear-stopped-expect.json \
+		--timeout=30 \
+		flux job attach --queue-check-interval=1 --show-status $jobid
+'
 test_expect_success NO_CHAIN_LINT 'attach: ignores non-fatal exceptions' '
 	flux queue stop &&
 	test_when_finished "flux queue start" &&

@@ -179,17 +179,28 @@ class ExpectEntry:
 
     An entry has the form
 
-        {"expect":s, "send":s, "timeout"?i}
+        {"expect":s, "send":s, "timeout"?i, "exit"?b}
+        or
+        {"expect":s, "command":s, "timeout"?i, "exit"?b}
 
     Where 'expect' is a pattern, 'send' is the string to send as input
-    after the expected pattern matches, and 'timeout' is an optional
-    integer number of seconds after which the pattern match times out.
+    after the expected pattern matches, 'command' is a shell command to
+    execute when the pattern matches, 'exit' is an optional boolean that
+    causes runpty to exit successfully after the match, and 'timeout' is
+    an optional integer number of seconds after which the pattern match
+    times out.
+
+    Either 'send' or 'command' may be specified, but not both.
     """
 
     def __init__(self, entry):
         self.expect = re.compile(entry["expect"])
-        self.send = entry["send"]
+        self.send = entry.get("send")
+        self.command = entry.get("command")
+        self.exit = entry.get("exit", False)
         self.timeout = int(entry.get("timeout", 60.0))
+        if self.send and self.command:
+            raise ValueError("Cannot specify both 'send' and 'command'")
 
     def __str__(self):
         return self.expect.pattern
@@ -242,14 +253,19 @@ class Expecter:
 
     def pop(self):
         """
-        Return the current data to send after a match and advance to the
-        next expected pattern.
+        Return the current entry after a match and advance to the
+        next expected pattern. Returns a tuple of (send_data, command, exit)
+        where send_data is bytes to write to pty (or None), command
+        is a shell command to execute (or None), and exit is a boolean
+        indicating whether runpty should exit successfully after this match.
         """
         if self.current:
-            data = self.current.send
+            send_data = self.current.send.encode("utf-8") if self.current.send else None
+            command = self.current.command
+            should_exit = self.current.exit
             self.next()
-            return data.encode("utf-8")
-        return None
+            return (send_data, command, should_exit)
+        return (None, None, False)
 
 
 class TTYBuffer:
@@ -440,7 +456,20 @@ def main():
         def read_tty():
             buf.read()
             if expect.match(buf.peek()):
-                os.write(fd, expect.pop())
+                send_data, command, should_exit = expect.pop()
+                if send_data:
+                    os.write(fd, send_data)
+                if command:
+                    os.system(command)
+                if should_exit:
+                    # Pattern matched and exit requested - terminate child
+                    # and exit successfully regardless of child exit status
+                    try:
+                        os.kill(pid, SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    loop.call_later(0.1, sys.exit, 0)
+                    return
             buf.send_data(ofile.write_entry)
             if buf.eof:
                 loop.stop()
