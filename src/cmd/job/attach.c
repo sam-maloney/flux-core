@@ -92,6 +92,10 @@ struct optparse_option attach_opts[] = {
     { .name = "debug-emulate", .has_arg = 0, .flags = OPTPARSE_OPT_HIDDEN,
       .usage = "Set MPIR_being_debugged for testing",
     },
+    { .name = "queue-check-interval", .has_arg = 1, .arginfo = "SECONDS",
+      .flags = OPTPARSE_OPT_HIDDEN,
+      .usage = "Set interval to check queue state for testing",
+    },
     OPTPARSE_TABLE_END
 };
 
@@ -145,6 +149,7 @@ struct attach_ctx {
     int prolog_running;
     bool fatal_exception;
     int last_queue_update;
+    int queue_check_interval;
     char *queue;
     bool queue_stopped;
     zlist_t *tail_output;
@@ -1229,11 +1234,12 @@ static void attach_notify (struct attach_ctx *ctx,
 
         /* If waiting for resources, fetch/update queue status periodically */
         if (strstarts (base_msg, "waiting for resources")) {
+            int last_queue_dt = dt - ctx->last_queue_update;
             if (!ctx->queue) {
                 fetch_job_queue (ctx);
             }
             else if (ctx->last_queue_update <= 0
-                     || (dt - ctx->last_queue_update >= 10)) {
+                     || (last_queue_dt >= ctx->queue_check_interval)) {
                 ctx->last_queue_update = dt;
                 fetch_queue_status (ctx);
             }
@@ -1535,6 +1541,9 @@ int cmd_attach (optparse_t *p, int argc, char **argv)
     ctx.p = p;
     ctx.readonly = optparse_hasopt (p, "read-only");
     ctx.unbuffered = optparse_hasopt (p, "unbuffered");
+    ctx.queue_check_interval = optparse_get_int (p,
+                                                 "queue-check-interval",
+                                                 10);
 
     if (optparse_hasopt (p, "stdin-ranks") && ctx.readonly)
         log_msg_exit ("Do not use --stdin-ranks with --read-only");
