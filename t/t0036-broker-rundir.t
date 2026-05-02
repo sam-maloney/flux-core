@@ -156,7 +156,7 @@ test_expect_success 'broker fails gracefully on non-directory rundir' '
 		true 2>notdir.err &&
 	grep "Not a directory" notdir.err
 '
-test_expect_success 'broker fails gracefully on unwriteable rundir' '
+test_expect_success 'broker fails gracefully on unwritable rundir' '
 	mkdir -p privdir &&
 	chmod u-w privdir &&
 	test_must_fail flux start ${ARGS_NORC} -Srundir=privdir \

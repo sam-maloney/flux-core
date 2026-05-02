@@ -537,7 +537,7 @@ static void release_all (flux_plugin_t *p, zlistx_t *l, int typemask)
 }
 
 /*
- *  Raise exceptions for all unhandled depednencies in list `l`.
+ *  Raise exceptions for all unhandled dependencies in list `l`.
  */
 static void raise_exceptions (flux_plugin_t *p, zlistx_t *l, const char *msg)
 {

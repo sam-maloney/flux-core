@@ -108,7 +108,7 @@ test_expect_success 'recovery mode aborts early if content is missing' '
 	grep "No such file or directory" empty.err
 '
 #  Note: some environments (such as fakeroot) do not appear to respect
-#  file permissions. In this case a read-only file is writeable and a
+#  file permissions. In this case a read-only file is writable and a
 #  write-only file may be readable, which will cause the following two
 #  tests to fail. Check for this condition and set a prereq that perms
 #  are working:

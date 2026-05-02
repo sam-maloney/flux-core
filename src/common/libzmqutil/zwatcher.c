@@ -16,7 +16,7 @@
  *
  * Brief summary of 0MQ integration:
  * - 0MQ provides ZMQ_EVENTS getsockopt to test whether a 0MQ socket is
- *   writeable or readable.
+ *   writable or readable.
  * - 0MQ provides ZMQ_FD getsockopt to obtain the fd of a mailbox that
  *   becomes readable when ZMQ_EVENTS != 0 (edge triggered)
  * - prepare/check watchers are used to test ZMQ_EVENTS, make user
