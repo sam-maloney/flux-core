@@ -155,7 +155,7 @@ static struct registered_attr attrtab[] = {
 
     // content
     { "content.backing-module", 0 },
-    { "content.hash", 0 },
+    { "content.hash", ATTR_IMMUTABLE },
     { "content.dump", ATTR_RUNTIME },
     { "content.restore", ATTR_RUNTIME },
 
