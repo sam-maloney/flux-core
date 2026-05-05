@@ -267,6 +267,56 @@ class TestOutputFormat(unittest.TestCase):
         formatter.sort_items(items)
         self.assertListEqual(items, [z, d, a])
 
+    def test_sort_empty_keys(self):
+        """Test that empty sort keys are skipped (issue #7590)"""
+        a = Item("a", 0, 2.2)
+        d = Item("d", 33, 1.1)
+        z = Item("z", 11, 1.0)
+
+        items = [z, a, d]
+        formatter = OutputFormat("{s}:{i}:{f}", headings=self.headings)
+
+        # Trailing comma should be ignored
+        formatter.set_sort_keys("s,")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Double comma should be ignored
+        items = [z, a, d]
+        formatter.set_sort_keys("s,,i")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Leading comma should be ignored
+        items = [z, a, d]
+        formatter.set_sort_keys(",s")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Multiple trailing commas
+        items = [z, a, d]
+        formatter.set_sort_keys("s,,,")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Whitespace-only key should be ignored
+        items = [z, a, d]
+        formatter.set_sort_keys("s,  ,i")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Multiple empty keys with whitespace variations
+        items = [z, a, d]
+        formatter.set_sort_keys(" , s , , i , ")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [a, d, z])
+
+        # Reverse sort with empty keys
+        items = [z, a, d]
+        formatter.set_sort_keys("-s,,")
+        formatter.sort_items(items)
+        self.assertListEqual(items, [z, d, a])
+
     def test_sort_mixed_types(self):
         """Test sorting fields with mixed types (issue #7517)"""
         # Create items with mixed types - some fields are empty strings,
