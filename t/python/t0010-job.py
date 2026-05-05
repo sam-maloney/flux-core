@@ -489,6 +489,31 @@ class TestJob(unittest.TestCase):
         self.assertEqual(jobid1, jobid2)
         self.assertEqual(jobid2.orig, "1234")
 
+        # Test that invalid JobID strings raise ValueError
+        invalid_jobids = [
+            "invalid",
+            "-1",
+            "0.0.0",  # invalid dothex (too few parts)
+            "0.0.0.0.0",  # invalid dothex (too many parts)
+            "0.0.0.g",  # invalid dothex (invalid hex)
+            "job.0.0",  # invalid kvs (too few parts)
+            "job.0.0.0.0.0",  # invalid kvs (too many parts)
+            "notjob.0.0.0.0",  # invalid kvs (wrong prefix)
+            "f0",  # invalid f58 (invalid base58 digit)
+            "fO",  # invalid f58 (invalid base58 digit)
+            "fI",  # invalid f58 (invalid base58 digit)
+            "invalid-words-test",  # invalid mnemonic
+            "foo-bar-baz--qux-quux-corge",  # invalid mnemonic
+            "🦄",  # invalid emoji (not in basemoji set)
+            # Note: cannot test timestamp out of range because such values
+            # would overflow 64-bit integers during parsing
+        ]
+        for invalid_str in invalid_jobids:
+            with self.assertRaises(
+                ValueError, msg=f"Expected ValueError for '{invalid_str}'"
+            ):
+                job.JobID(invalid_str)
+
     def test_25_job_list_attrs(self):
         expected_attrs = [
             "userid",

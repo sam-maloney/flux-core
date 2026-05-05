@@ -231,6 +231,62 @@ static void test_fluid_parse (void)
         "fluid_parse returns EINVAL for 'f'");
     ok (fluid_parse ("-1", &id) < 0 && errno == EINVAL,
         "fluid_parse returns EINVAL for '-1'");
+
+    /* Test invalid dothex formats */
+    errno = 0;
+    ok (fluid_parse ("0.0.0", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid dothex '0.0.0' (too few parts)");
+    errno = 0;
+    ok (fluid_parse ("0.0.0.0.0", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid dothex '0.0.0.0.0' (too many parts)");
+    errno = 0;
+    ok (fluid_parse ("0.0.0.g", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid dothex '0.0.0.g' (invalid hex char)");
+    errno = 0;
+    ok (fluid_parse ("0.0.0.", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid dothex '0.0.0.' (trailing dot)");
+    errno = 0;
+    ok (fluid_parse (".0.0.0", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid dothex '.0.0.0' (leading dot)");
+
+    /* Test invalid f58 formats */
+    errno = 0;
+    ok (fluid_parse ("f0", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid f58 'f0' (invalid base58 digit)");
+    errno = 0;
+    ok (fluid_parse ("fO", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid f58 'fO' (invalid base58 digit)");
+    errno = 0;
+    ok (fluid_parse ("fI", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid f58 'fI' (invalid base58 digit)");
+    errno = 0;
+    ok (fluid_parse ("fl", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid f58 'fl' (invalid base58 digit)");
+
+    /* Test invalid mnemonic formats */
+    errno = 0;
+    ok (fluid_parse ("invalid-words-test", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid mnemonic 'invalid-words-test'");
+    errno = 0;
+    ok (fluid_parse ("foo-bar-baz--qux-quux-corge", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid mnemonic 'foo-bar-baz--qux-...'");
+
+    /* Test integer values that overflow */
+    errno = 0;
+    ok (fluid_parse ("18446744073709551616", &id) < 0 && errno == ERANGE,
+        "fluid_parse: ERANGE for invalid integer > UINT64_MAX");
+
+    /* Note: It's impossible to test validation failures for timestamp out of
+     * range with valid 64-bit fluids, because any timestamp > 40 bits would
+     * cause the flu id (timestamp << 24) to overflow 64 bits. The validation
+     * logic is still correct and necessary for when fluid_t might be larger
+     * than 64 bits in the future, or for catching programmer errors.
+     */
+
+    /* Test invalid emoji string (use an emoji not in the basemoji set) */
+    errno = 0;
+    ok (fluid_parse ("🦄", &id) < 0 && errno == EINVAL,
+        "fluid_parse: EINVAL for invalid emoji string");
 }
 
 void test_basic (void)

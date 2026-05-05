@@ -459,6 +459,70 @@ void check_jobid_parse_encode (void)
         "flux_job_id_encode with too small buffer returns EOVERFLOW");
     ok (flux_job_id_encode (1234, "foo", buf, 1024) < 0 && errno == EPROTO,
         "flux_job_id_encode with unknown encode type returns EPROTO");
+
+    /* Test that flux_job_id_parse() sets errno for invalid input */
+    errno = 0;
+    ok (flux_job_id_parse (NULL, &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for NULL string");
+    errno = 0;
+    ok (flux_job_id_parse ("", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for empty string");
+    errno = 0;
+    ok (flux_job_id_parse ("invalid", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid string");
+    errno = 0;
+    ok (flux_job_id_parse ("-1", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for negative number");
+
+    /* Test invalid dothex formats */
+    errno = 0;
+    ok (flux_job_id_parse ("0.0.0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid dothex '0.0.0' (too few parts)");
+    errno = 0;
+    ok (flux_job_id_parse ("0.0.0.0.0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid dothex '0.0.0.0.0' (too many parts)");
+    errno = 0;
+    ok (flux_job_id_parse ("0.0.0.g", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid dothex '0.0.0.g' (invalid hex)");
+
+    /* Test invalid kvs format */
+    errno = 0;
+    ok (flux_job_id_parse ("job.0.0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid kvs 'job.0.0' (too few parts)");
+    errno = 0;
+    ok (flux_job_id_parse ("job.0.0.0.0.0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid kvs 'job.0.0.0.0.0' (too many parts)");
+    errno = 0;
+    ok (flux_job_id_parse ("notjob.0.0.0.0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid kvs 'notjob.0.0.0.0' (wrong prefix)");
+
+    /* Test invalid f58 formats */
+    errno = 0;
+    ok (flux_job_id_parse ("f0", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid f58 'f0' (invalid base58 digit)");
+    errno = 0;
+    ok (flux_job_id_parse ("fO", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid f58 'fO' (invalid base58 digit)");
+    errno = 0;
+    ok (flux_job_id_parse ("fI", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid f58 'fI' (invalid base58 digit)");
+
+    /* Test invalid mnemonic formats */
+    errno = 0;
+    ok (flux_job_id_parse ("invalid-words-test", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid mnemonic 'invalid-words-test'");
+    errno = 0;
+    ok (flux_job_id_parse ("foo-bar-baz--qux-quux-corge", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid mnemonic 'foo-bar-baz--...'");
+
+    /* Note: Cannot test validation failures for timestamp out of range
+     * because any such value would overflow 64-bit integers during parsing.
+     */
+
+    /* Test invalid emoji string (emoji not in basemoji set) */
+    errno = 0;
+    ok (flux_job_id_parse ("🦄", &jobid) < 0 && errno == EINVAL,
+        "flux_job_id_parse: EINVAL for invalid emoji string");
 }
 
 static void check_job_timeleft (void)
