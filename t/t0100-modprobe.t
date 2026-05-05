@@ -1047,6 +1047,37 @@ test_expect_success 'modprobe: FLUX_MODPROBE_PATH_APPEND works' '
 	grep $(flux config builtin datadir)/modprobe/modprobe.d path-append.out &&
 	grep $(flux config builtin libexecdir)/modprobe/rc1.d path-append.out
 '
+test_expect_success 'modprobe: FLUX_MODPROBE_PATH and FLUX_MODPROBE_PATH_APPEND work together' '
+	FLUX_MODPROBE_PATH=/custom/path \
+	  FLUX_MODPROBE_PATH_APPEND=/append/path \
+	  flux modprobe rc1 --dry-run --verbose >path-both.out 2>&1 &&
+	test_debug "grep checking path-both.out" &&
+	grep "checking /custom/path/modprobe.d" path-both.out &&
+	grep "checking /append/path/modprobe.d" path-both.out &&
+	test_must_fail \
+	  grep $(flux config builtin datadir)/modprobe/modprobe.d path-both.out &&
+	test_must_fail \
+	  grep $(flux config builtin libexecdir)/modprobe/rc1.d path-both.out
+'
+test_expect_success 'modprobe: empty entries in search path are filtered' '
+	FLUX_MODPROBE_PATH=/path1::/path2 \
+	  FLUX_MODPROBE_PATH_APPEND=:/append1::/append2: \
+	  flux modprobe rc1 --dry-run --verbose >path-empty.out 2>&1 &&
+	test_debug "grep checking path-empty.out" &&
+	grep "checking /path1/modprobe.d" path-empty.out &&
+	grep "checking /path2/modprobe.d" path-empty.out &&
+	grep "checking /append1/modprobe.d" path-empty.out &&
+	grep "checking /append2/modprobe.d" path-empty.out
+'
+test_expect_success 'modprobe: duplicate paths are removed from search path' '
+	FLUX_MODPROBE_PATH=/test/path:/other/path \
+	  FLUX_MODPROBE_PATH_APPEND=/test/path:/third/path \
+	  flux modprobe rc1 --dry-run --verbose >path-dup.out 2>&1 &&
+	test_debug "grep checking path-dup.out" &&
+	test $(grep -c "checking /test/path/modprobe.d" path-dup.out) -eq 1 &&
+	grep "checking /other/path/modprobe.d" path-dup.out &&
+	grep "checking /third/path/modprobe.d" path-dup.out
+'
 test_expect_success 'modprobe: detects missing required modprobe.toml keys' '
 	mkdir modprobe.d &&
 	test_when_finished "rm -rf modprobe.d" &&

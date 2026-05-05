@@ -1009,9 +1009,11 @@ class ConfigLoader:
         """
         searchpath = []
         if "FLUX_MODPROBE_PATH" in os.environ:
-            searchpath = filter(
-                lambda s: s and not s.isspace(),
-                os.environ["FLUX_MODPROBE_PATH"].split(":"),
+            searchpath = list(
+                filter(
+                    lambda s: s and not s.isspace(),
+                    os.environ["FLUX_MODPROBE_PATH"].split(":"),
+                )
             )
         else:
             pkgdir = conf_builtin_get(builtindir)
