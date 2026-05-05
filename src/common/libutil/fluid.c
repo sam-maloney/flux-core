@@ -361,18 +361,12 @@ int fluid_encode (char *buf, int bufsz, fluid_t fluid,
 static int fluid_validate (fluid_t fluid)
 {
     unsigned long long ts = fluid >> (bits_per_seq + bits_per_id);
-    unsigned int id = (fluid >> bits_per_seq) & ((1<<bits_per_id) - 1);
-    unsigned int seq = fluid & ((1<<bits_per_seq) - 1);
 
+    /* Note: id and seq are extracted with bit masks that ensure they
+     * are always within valid ranges, so no validation needed for them.
+     * Only timestamp needs validation since it's extracted without a mask.
+     */
     if (ts >= (1ULL<<bits_per_ts)) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (id >= (1<<bits_per_id)) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (seq >= (1<<bits_per_seq)) {
         errno = EINVAL;
         return -1;
     }
