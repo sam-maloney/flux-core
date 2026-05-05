@@ -1312,6 +1312,9 @@ class OutputFormat:
         self.sort_keys = []
         for key in sort_keys.split(","):
             key = key.strip()
+            # Skip empty keys (ignore trailing, double ',')
+            if not key:
+                continue
             reverse = False
             if key.startswith("-"):
                 reverse = True
