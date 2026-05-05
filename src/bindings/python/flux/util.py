@@ -830,6 +830,7 @@ class OutputFormat:
 
     formatter = UtilFormatter
     headings: Mapping[str, str] = {}
+    _sort_prefix_re = re.compile(r"sort:([^{\s]+)")
 
     class HeaderFormatter(UtilFormatter):
         """Custom formatter for flux utilities header row.
@@ -879,16 +880,12 @@ class OutputFormat:
         #  self.sort_keys is a list of (key(str), reverse(bool)) tuples.
         self.sort_keys = []
         if self.format_list and self.format_list[0][0].startswith("sort:"):
-            #  Remove sort:keys, prefix from format_list, replace with
-            #   empty string:
+            #  Remove sort:keys prefix from format_list,
+            #  replace with empty string:
             sort_spec = self.format_list[0][0]
             self.format_list[0][0] = ""
-
-            #  Store sort keys for later use
-            self.set_sort_keys(sort_spec[5:])
-
-            #  Strip sort_spec from beginning of fmt
-            fmt = fmt.lstrip(sort_spec)
+            #  Parse and strip the sort prefix from fmt
+            fmt = self._parse_and_strip_sort_prefix(sort_spec, fmt)
 
         #  Save format after removal of sort keys:
         self.fmt = fmt
@@ -1298,6 +1295,36 @@ class OutputFormat:
 
         #  Return new format string:
         return self._sort_prefix() + "".join(self._fmt_tuple(*x) for x in format_list)
+
+    def _parse_and_strip_sort_prefix(self, sort_spec, fmt):
+        """
+        Extract sort keys from a sort prefix and strip it from the format
+        string.
+
+        The sort prefix has the form "sort:key1,key2,-key3" followed
+        by whitespace or the start of the format string. This method
+        extracts only the key names, stopping at the first whitespace or
+        '{' character to avoid accidentally including punctuation from
+        the format string itself (issue #7590).
+
+        Args:
+            sort_spec (str): The text portion from format_list[0][0]
+            starting with "sort:"
+            fmt (str): The original format string
+
+        Returns:
+            str: The format string with the sort prefix removed
+        """
+        match = self._sort_prefix_re.match(sort_spec)
+        if match:
+            sort_keys_str = match.group(1)
+            self.set_sort_keys(sort_keys_str)
+            # Strip "sort:keys" and exactly one trailing space if present
+            prefix_len = len("sort:") + len(sort_keys_str)
+            fmt = fmt[prefix_len:]
+            if fmt.startswith(" "):
+                fmt = fmt[1:]
+        return fmt
 
     def set_sort_keys(self, sort_keys):
         """
