@@ -291,14 +291,25 @@ static int fluid_decode_dothex (const char *s, fluid_t *fluid)
 {
     int i;
     char *endptr;
+    const char *p;
     uint64_t b[4];
 
     for (i = 0; i < 4; i++) {
-        b[i] = strtoul (i == 0 ? s : endptr + 1, &endptr, 16);
-        if (i < 3 && *endptr != '.')
+        p = (i == 0 ? s : endptr + 1);
+        b[i] = strtoul (p, &endptr, 16);
+        /* Ensure strtoul parsed something */
+        if (endptr == p) {
+            errno = EINVAL;
             return -1;
-        if (i == 3 && *endptr != '\0')
+        }
+        if (i < 3 && *endptr != '.') {
+            errno = EINVAL;
             return -1;
+        }
+        if (i == 3 && *endptr != '\0') {
+            errno = EINVAL;
+            return -1;
+        }
     }
     *fluid = (b[0] << 48) | (b[1] << 32) | (b[2] << 16) | b[3];
     return 0;
@@ -353,12 +364,18 @@ static int fluid_validate (fluid_t fluid)
     unsigned int id = (fluid >> bits_per_seq) & ((1<<bits_per_id) - 1);
     unsigned int seq = fluid & ((1<<bits_per_seq) - 1);
 
-    if (ts >= (1ULL<<bits_per_ts))
+    if (ts >= (1ULL<<bits_per_ts)) {
+        errno = EINVAL;
         return -1;
-    if (id >= (1<<bits_per_id))
+    }
+    if (id >= (1<<bits_per_id)) {
+        errno = EINVAL;
         return -1;
-    if (seq >= (1<<bits_per_seq))
+    }
+    if (seq >= (1<<bits_per_seq)) {
+        errno = EINVAL;
         return -1;
+    }
     return 0;
 }
 
@@ -390,8 +407,10 @@ int fluid_decode (const char *s, fluid_t *fluidp, fluid_string_type_t type)
                 return -1;
             break;
         case FLUID_STRING_EMOJI:
-            if (uint64_basemoji_decode (s, &fluid) < 0)
+            if (uint64_basemoji_decode (s, &fluid) < 0) {
+                errno = EINVAL;
                 return -1;
+            }
             break;
         default:
             errno = EINVAL;
