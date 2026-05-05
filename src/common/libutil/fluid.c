@@ -289,29 +289,17 @@ static int fluid_f58_decode (fluid_t *idptr, const char *str)
 
 static int fluid_decode_dothex (const char *s, fluid_t *fluid)
 {
-    int i;
-    char *endptr;
-    const char *p;
-    uint64_t b[4];
-
-    for (i = 0; i < 4; i++) {
-        p = (i == 0 ? s : endptr + 1);
-        b[i] = strtoul (p, &endptr, 16);
-        /* Ensure strtoul parsed something */
-        if (endptr == p) {
-            errno = EINVAL;
-            return -1;
-        }
-        if (i < 3 && *endptr != '.') {
-            errno = EINVAL;
-            return -1;
-        }
-        if (i == 3 && *endptr != '\0') {
-            errno = EINVAL;
-            return -1;
-        }
+    unsigned int b[4];
+    int n = 0;
+    if (sscanf (s, "%4x.%4x.%4x.%4x%n", &b[0], &b[1], &b[2], &b[3], &n) != 4
+        || s[n] != '\0') {
+        errno = EINVAL;
+        return -1;
     }
-    *fluid = (b[0] << 48) | (b[1] << 32) | (b[2] << 16) | b[3];
+    *fluid = ((uint64_t)b[0] << 48)
+        | ((uint64_t)b[1] << 32)
+        | ((uint64_t)b[2] << 16)
+        | b[3];
     return 0;
 }
 
