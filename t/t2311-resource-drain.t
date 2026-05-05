@@ -543,4 +543,62 @@ test_expect_success 'load scheduler' '
 	flux module load sched-simple
 '
 
+# Tests for issue #7590: sort key parsing with commas in format string
+test_expect_success 'drain two nodes with different reasons for sorting tests' '
+	flux resource drain 0 aardvark &&
+	flux resource drain 1 zebra
+'
+test_expect_success 'flux resource drain: sort keys work with comma in format (issue #7590)' '
+	flux resource drain -n -o "sort:reason {reason},{nodelist}" \
+		>drain-sort-comma.out &&
+	test_debug "cat drain-sort-comma.out" &&
+	cat >drain-sort-comma.exp <<-EOT &&
+	aardvark,fake0
+	zebra,fake1
+	EOT
+	test_cmp drain-sort-comma.exp drain-sort-comma.out
+'
+test_expect_success 'flux resource drain: multiple spaces after sort: preserved in output' '
+	flux resource drain -n -o "sort:reason  {reason} {nodelist}" \
+		>drain-sort-spaces.out &&
+	test_debug "cat drain-sort-spaces.out" &&
+	cat >drain-sort-spaces.exp <<-EOT &&
+	 aardvark fake0
+	 zebra fake1
+	EOT
+	test_cmp drain-sort-spaces.exp drain-sort-spaces.out
+'
+test_expect_success 'flux resource drain: tab after sort: preserved in output' '
+	flux resource drain -n -o "sort:reason	{reason} {nodelist}" \
+		>drain-sort-tab.out &&
+	test_debug "cat drain-sort-tab.out" &&
+	printf "\taardvark fake0\n\tzebra fake1\n" >drain-sort-tab.exp &&
+	test_cmp drain-sort-tab.exp drain-sort-tab.out
+'
+test_expect_success \
+'flux resource drain: other characters after sort: preserved in output' '
+	flux resource drain -n -o "sort:reason == {reason},{nodelist}" \
+		>drain-sort-other.out &&
+	test_debug "cat drain-sort-other.out" &&
+	cat <<-EOF >drain-sort-other.exp &&
+	== aardvark,fake0
+	== zebra,fake1
+	EOF
+	test_cmp drain-sort-other.exp drain-sort-other.out
+'
+test_expect_success \
+'flux resource drain: reverse sort works with comma in format' '
+	flux resource drain -n -o "sort:-reason {reason},{nodelist}" \
+		>drain-rsort-comma.out &&
+	test_debug "cat drain-rsort-comma.out" &&
+	cat >drain-rsort-comma.exp <<-EOT &&
+	zebra,fake1
+	aardvark,fake0
+	EOT
+	test_cmp drain-rsort-comma.exp drain-rsort-comma.out
+'
+test_expect_success 'undrain nodes for cleanup' '
+	flux resource undrain 0-1
+'
+
 test_done
