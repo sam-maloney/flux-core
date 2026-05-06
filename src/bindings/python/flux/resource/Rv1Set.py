@@ -486,8 +486,7 @@ class Rv1Set(ResourceSetImplementation):
             gpus_per_slot = self.count("gpu") // self._nslots
 
         if getattr(self, "_has_nodelist", False):
-            hostnames = [info["hostname"] for _, info in sorted(self._ranks.items())]
-            execution["nodelist"] = [str(Hostlist(",".join(hostnames)))]
+            execution["nodelist"] = [str(self.nodelist())]
 
         if self._properties:
             execution["properties"] = {
