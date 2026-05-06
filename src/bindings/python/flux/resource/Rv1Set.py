@@ -482,6 +482,8 @@ class Rv1Set(ResourceSetImplementation):
         }
         if getattr(self, "_nslots", 0) > 0:
             execution["nslots"] = self._nslots
+            cores_per_slot = self.count("core") // self._nslots
+            gpus_per_slot = self.count("gpu") // self._nslots
 
         if getattr(self, "_has_nodelist", False):
             hostnames = [info["hostname"] for _, info in sorted(self._ranks.items())]
@@ -495,8 +497,45 @@ class Rv1Set(ResourceSetImplementation):
             }
 
         result = {"version": 1, "execution": execution}
+
+        resources = []
+        for (cores, gpus), ranks in sorted(
+            by_resources.items(), key=lambda item: min(item[1])
+        ):
+            hostnames = [self._ranks[rank]["hostname"] for rank in ranks]
+            nodelist = str(Hostlist(",".join(hostnames)))
+            resources.append({
+                "type": "node",
+                "count": len(ranks),
+                "nodelist": nodelist,
+                "ids": _idset_str(ranks),
+            })
+            children = [{
+                "type": "core",
+                "count": cores_per_slot if self._nslots else len(cores),
+                "ids": _idset_str(cores),
+            }]
+            if gpus:
+                children.append({
+                    "type": "gpu",
+                    "count": gpus_per_slot if self._nslots else len(gpus),
+                    "ids": _idset_str(gpus),
+                })
+            if self._nslots:
+                resources[-1]["with"] = [{
+                    "type": "slot",
+                    "count": len(cores) // cores_per_slot,
+                    "label": "task",
+                    "with": children,
+                }]
+            else:
+                resources[-1]["with"] = children
+
         if self.scheduling:
-            result["scheduling"] = self.scheduling
+            self.scheduling["resources"] = resources
+        else:
+            self.scheduling = {"resources": resources}
+        result["scheduling"] = self.scheduling
         return result
 
     # ------------------------------------------------------------------
