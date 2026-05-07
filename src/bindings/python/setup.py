@@ -14,11 +14,12 @@ from setuptools import setup
 
 here = os.path.abspath(os.path.dirname(__file__))
 cffi_dep = "cffi>=1.1"
+ply_dep = "ply>=3.9"
 setup(
     name="flux",
     version="0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.1a1",
     description="Bindings to the flux resource manager API",
     setup_requires=[cffi_dep],
     cffi_modules=["_flux/_core_build.py:ffi"],
-    install_requires=[cffi_dep],
+    install_requires=[cffi_dep, ply_dep],
 )
