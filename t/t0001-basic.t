@@ -884,15 +884,22 @@ test_expect_success 'commands prefixed with the invalid command are favored' '
 	test_must_fail grep "mee" invalid6.out
 '
 
+# N.B. "awesome1.23456" is more different than "awesome2.1" compared
+# to "awesome1", but the perfectly matched prefix makes it favored for
+# output
 test_expect_success 'commands with longer prefixes get special treatment' '
 	TEMPDIR1=$(mktemp -d) &&
-	touch $TEMPDIR1/flux-python3.12 &&
-	chmod +x $TEMPDIR1/flux-python3.12 &&
-	touch $TEMPDIR1/flux-python3.157 &&
-	chmod +x $TEMPDIR1/flux-python3.157 &&
-	test_must_fail sh -c "FLUX_EXEC_PATH=$TEMPDIR1 flux python3 > invalid7.out 2>&1" &&
-	grep "python3.12" invalid7.out &&
-	grep "python3.157" invalid7.out
+	touch $TEMPDIR1/flux-awesome1.1 &&
+	chmod +x $TEMPDIR1/flux-awesome1.1 &&
+	touch $TEMPDIR1/flux-awesome1.23456 &&
+	chmod +x $TEMPDIR1/flux-awesome1.23456 &&
+	touch $TEMPDIR1/flux-awesome2.1 &&
+	chmod +x $TEMPDIR1/flux-awesome2.1 &&
+	test_must_fail sh -c "FLUX_EXEC_PATH=$TEMPDIR1 flux awesome1 > invalid7.out 2>&1" &&
+	test_debug "cat invalid7.out" &&
+	grep "awesome1.1" invalid7.out &&
+	grep "awesome1.23456" invalid7.out &&
+	test_must_fail grep "awesome2" invalid7.out
 '
 
 test_expect_success 'at most 3 suggested similar commands are output' '
