@@ -35,19 +35,20 @@ for entry in matrix["include"]:
 # latest docker images after a tag. (See flux-core#7225).
 tags = {k: v for k, v in tags.items() if len(v) > 1 or v[0] != k}
 
-# The bookworm image is the canonical "latest" build. Create a latest
+# The el10 image is the canonical "latest" build. Create a latest
 # manifest (and for tagged releases, also a versioned manifest) pointing
-# to the same per-arch images as the bookworm manifest.
-bookworm_key = f"{DOCKER_REPO}:bookworm"
-if bookworm_key in tags:
-    bookworm_sources = tags[bookworm_key]
+# to the same per-arch images as the el10 manifest.
+latest_distro = "el10"
+latest_key = f"{DOCKER_REPO}:{latest_distro}"
+if latest_key in tags:
+    latest_sources = tags[latest_key]
     github_tag = next(
         (entry["tag"] for entry in matrix["include"] if entry.get("tag")),
         None,
     )
-    tags[f"{DOCKER_REPO}:latest"] = bookworm_sources
+    tags[f"{DOCKER_REPO}:latest"] = latest_sources
     if github_tag:
-        tags[f"{DOCKER_REPO}:{github_tag}"] = bookworm_sources
+        tags[f"{DOCKER_REPO}:{github_tag}"] = latest_sources
 
 for tag in tags.keys():
     print(f"docker manifest create {tag}", *tags[tag])
