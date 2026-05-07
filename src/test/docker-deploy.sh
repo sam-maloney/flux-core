@@ -25,6 +25,10 @@ if echo "$DOCKER_TAG" | grep -q "el8"; then
     FLUXORAMA="fluxrm/fluxorama"
     docker build -t ${FLUXORAMA} src/test/docker/fluxorama
     docker push ${FLUXORAMA}
+    # Derive version from DOCKER_TAG if present (e.g. fluxrm/flux-core:el8-v0.85.0)
+    case "$DOCKER_TAG" in
+        *:el8-*) GITHUB_TAG="${DOCKER_TAG##*:el8-}" ;;
+    esac
     if test -n "$GITHUB_TAG"; then
         t=${FLUXORAMA}:${GITHUB_TAG}
         log "docker push ${t}"
