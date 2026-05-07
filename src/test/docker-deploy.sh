@@ -20,18 +20,15 @@ echo $DOCKER_PASSWORD | docker login -u "$DOCKER_USERNAME" --password-stdin
 log "docker push ${DOCKER_TAG}"
 docker push ${DOCKER_TAG}
 
-#  If this is the bookworm build, then also tag without image name:
-if echo "$DOCKER_TAG" | grep "bookworm" | grep -qv "386"; then
-    t="${DOCKER_REPO}:${GITHUB_TAG:-latest}"
-    log "docker push ${t}"
-    docker tag "$DOCKER_TAG" ${t} && docker push ${t}
-fi
-
 #  If this is the el8 build, then build fluxorama image
 if echo "$DOCKER_TAG" | grep -q "el8"; then
     FLUXORAMA="fluxrm/fluxorama"
     docker build -t ${FLUXORAMA} src/test/docker/fluxorama
     docker push ${FLUXORAMA}
+    # Derive version from DOCKER_TAG if present (e.g. fluxrm/flux-core:el8-v0.85.0)
+    case "$DOCKER_TAG" in
+        *:el8-*) GITHUB_TAG="${DOCKER_TAG##*:el8-}" ;;
+    esac
     if test -n "$GITHUB_TAG"; then
         t=${FLUXORAMA}:${GITHUB_TAG}
         log "docker push ${t}"
