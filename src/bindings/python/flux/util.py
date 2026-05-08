@@ -830,6 +830,7 @@ class OutputFormat:
 
     formatter = UtilFormatter
     headings: Mapping[str, str] = {}
+    _sort_prefix_re = re.compile(r"sort:([^{\s]+)")
 
     class HeaderFormatter(UtilFormatter):
         """Custom formatter for flux utilities header row.
@@ -879,16 +880,10 @@ class OutputFormat:
         #  self.sort_keys is a list of (key(str), reverse(bool)) tuples.
         self.sort_keys = []
         if self.format_list and self.format_list[0][0].startswith("sort:"):
-            #  Remove sort:keys, prefix from format_list, replace with
-            #   empty string:
-            sort_spec = self.format_list[0][0]
-            self.format_list[0][0] = ""
-
-            #  Store sort keys for later use
-            self.set_sort_keys(sort_spec[5:])
-
-            #  Strip sort_spec from beginning of fmt
-            fmt = fmt.lstrip(sort_spec)
+            #  Remove sort:keys prefix from format_list and fmt
+            fmt, self.format_list[0][0] = self._parse_and_strip_sort_prefix(
+                self.format_list[0][0], fmt
+            )
 
         #  Save format after removal of sort keys:
         self.fmt = fmt
@@ -1117,7 +1112,9 @@ class OutputFormat:
     def _sort_prefix(self):
         if self.sort_keys:
             keys = [f"-{x}" if rev else x for x, rev in self.sort_keys]
-            return "sort:" + ",".join(keys) + " "
+            # Add trailing space only if original format had one
+            space = " " if getattr(self, "_sort_has_trailing_space", True) else ""
+            return "sort:" + ",".join(keys) + space
         return ""
 
     def get_format(self, orig=False, include_sort_prefix=True):
@@ -1299,6 +1296,44 @@ class OutputFormat:
         #  Return new format string:
         return self._sort_prefix() + "".join(self._fmt_tuple(*x) for x in format_list)
 
+    def _parse_and_strip_sort_prefix(self, sort_spec, fmt):
+        """
+        Extract sort keys from a sort prefix and strip it from the format
+        string.
+
+        The sort prefix has the form "sort:key1,key2,-key3" followed by
+        whitespace or the start of the format string, which may contain
+        arbitrary characters the user wants to print. This method extracts
+        only the key names, stopping at the first whitespace or '{' character
+        to avoid accidentally including punctuation from the format string
+        itself (issue #7590).
+
+        Args:
+            sort_spec (str): The text portion from format_list[0][0]
+                             starting with "sort:"
+            fmt (str): The original format string
+
+        Returns:
+            str: The format string with the sort prefix removed
+            str: Remainder of string in format_list[0][0] not consumed
+        """
+        match = self._sort_prefix_re.match(sort_spec)
+        if match:
+            sort_keys_str = match.group(1)
+            self.set_sort_keys(sort_keys_str)
+            # Strip "sort:keys" and track if there was a trailing space
+            prefix_len = len("sort:") + len(sort_keys_str)
+            # Save the rest of the string
+            rest = sort_spec[prefix_len:]
+            fmt = fmt[prefix_len:]
+            if fmt.startswith(" "):
+                self._sort_has_trailing_space = True
+                fmt = fmt[1:]
+                rest = rest[1:]
+            else:
+                self._sort_has_trailing_space = False
+        return fmt, rest
+
     def set_sort_keys(self, sort_keys):
         """
         Override current sort keys used in print_items() which may have
@@ -1312,6 +1347,9 @@ class OutputFormat:
         self.sort_keys = []
         for key in sort_keys.split(","):
             key = key.strip()
+            # Skip empty keys (ignore trailing, double ',')
+            if not key:
+                continue
             reverse = False
             if key.startswith("-"):
                 reverse = True
