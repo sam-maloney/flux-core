@@ -84,6 +84,71 @@ void check_sendzsock (void)
     zmq_close (zsock[1]);
 }
 
+/* Exercise the zerocopy path with a payload larger than ZEROCOPY_THRESHOLD */
+void check_sendzsock_large (void)
+{
+    void *zsock[2] = { NULL, NULL };
+    flux_msg_t *msg, *msg2;
+    const char *uri = "inproc://test-large";
+    const size_t paysize = 128 * 1024;
+    void *payload;
+    const void *payload2;
+    size_t payload2_size;
+    int type;
+
+    ok ((zsock[0] = zmq_socket (zctx, ZMQ_PAIR)) != NULL
+        && zmq_bind (zsock[0], uri) == 0
+        && (zsock[1] = zmq_socket (zctx, ZMQ_PAIR)) != NULL
+        && zmq_connect (zsock[1], uri) == 0,
+        "large: got inproc socket pair");
+
+    if (zsetsockopt_int (zsock[0], ZMQ_LINGER, 5) < 0
+        || zsetsockopt_int (zsock[1], ZMQ_LINGER, 5) < 0)
+        BAIL_OUT ("could not set ZMQ_LINGER socket option");
+
+    ok ((payload = malloc (paysize)) != NULL,
+        "large: allocated 64K payload");
+    memset (payload, 0xab, paysize);
+
+    ok ((msg = flux_msg_create (FLUX_MSGTYPE_REQUEST)) != NULL
+        && flux_msg_set_topic (msg, "big.payload") == 0
+        && flux_msg_set_payload (msg, payload, paysize) == 0,
+        "large: created message with 64K payload");
+    free (payload);
+
+    ok (zmqutil_msg_send (zsock[1], msg) == 0,
+        "large: zmqutil_msg_send works");
+
+    /* Release our reference before recv:
+     * zerocopy should keep msg alive via incref
+     */
+    flux_msg_destroy (msg);
+
+    ok ((msg2 = zmqutil_msg_recv (zsock[0])) != NULL,
+        "large: zmqutil_msg_recv works");
+    ok (flux_msg_get_type (msg2, &type) == 0 && type == FLUX_MSGTYPE_REQUEST,
+        "large: decoded message has correct type");
+    ok (flux_msg_get_payload (msg2, &payload2, &payload2_size) == 0
+        && payload2_size == paysize,
+        "large: decoded payload has correct size");
+
+    /* Verify payload content */
+    bool payload_ok = true;
+    const uint8_t *p = payload2;
+    for (size_t i = 0; i < payload2_size; i++) {
+        if (p[i] != 0xab) {
+            payload_ok = false;
+            break;
+        }
+    }
+    ok (payload_ok, "large: decoded payload content is correct");
+
+    flux_msg_destroy (msg2);
+
+    zmq_close (zsock[0]);
+    zmq_close (zsock[1]);
+}
+
 int main (int argc, char *argv[])
 {
     plan (NO_PLAN);
@@ -92,6 +157,7 @@ int main (int argc, char *argv[])
         BAIL_OUT ("could not create zeromq context");
 
     check_sendzsock ();
+    check_sendzsock_large ();
 
     zmq_ctx_term (zctx);
 

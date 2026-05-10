@@ -26,6 +26,40 @@
 #include "sockopt.h"
 #include "msg_zsock.h"
 
+#define ZEROCOPY_THRESHOLD (64 * 1024)
+
+static void zerocopy_free (void *data, void *hint)
+{
+    flux_msg_decref (hint);
+}
+
+static int zerocopy_send (void *sock,
+                          struct msg_iovec *iov,
+                          int flags,
+                          const flux_msg_t *msg)
+{
+    zmq_msg_t zmsg;
+
+    /* zmq_msg_init_data() hands ownership of iov->data to zeromq,
+     * increment refcount on msg (the owner of iov->data) so msg
+     * is not freed until zeromq is done with the data.
+     */
+    flux_msg_incref (msg);
+    if (zmq_msg_init_data (&zmsg,
+                           (void *)iov->data,
+                           iov->size,
+                           zerocopy_free,
+                           (void *)msg) < 0) {
+        flux_msg_decref (msg);
+        return -1;
+    }
+    if (zmq_msg_send (&zmsg, sock, flags) < 0) {
+        zmq_msg_close (&zmsg); // calls zerocopy_free -> flux_msg_decref
+        return -1;
+    }
+    return 0;
+}
+
 int zmqutil_msg_send_ex (void *sock, const flux_msg_t *msg, bool nonblock)
 {
     int flags = ZMQ_SNDMORE;
@@ -49,11 +83,20 @@ int zmqutil_msg_send_ex (void *sock, const flux_msg_t *msg, bool nonblock)
     while (count < iovcnt) {
         if ((count + 1) == iovcnt)
             flags &= ~ZMQ_SNDMORE;
-        if (zmq_send (sock,
-                      iov[count].data,
-                      iov[count].size,
-                      flags) < 0)
-            goto error;
+        if (iov[count].size >= ZEROCOPY_THRESHOLD) {
+            if (zerocopy_send (sock,
+                               &iov[count],
+                               flags,
+                               msg) < 0)
+                goto error;
+        }
+        else {
+            if (zmq_send (sock,
+                          iov[count].data,
+                          iov[count].size,
+                          flags) < 0)
+                goto error;
+        }
         count++;
     }
     rc = 0;
