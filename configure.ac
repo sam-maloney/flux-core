@@ -119,6 +119,12 @@ LIBFLUX_TASKMAP_AGE=0
 LIBFLUX_TASKMAP_VERSION_INFO=$LIBFLUX_TASKMAP_CURRENT:$LIBFLUX_TASKMAP_REVISION:$LIBFLUX_TASKMAP_AGE
 AC_SUBST([LIBFLUX_TASKMAP_VERSION_INFO])
 
+LIBFLUX_COUNT_CURRENT=1
+LIBFLUX_COUNT_REVISION=0
+LIBFLUX_COUNT_AGE=0
+LIBFLUX_COUNT_VERSION_INFO=$LIBFLUX_COUNT_CURRENT:$LIBFLUX_COUNT_REVISION:$LIBFLUX_COUNT_AGE
+AC_SUBST([LIBFLUX_COUNT_VERSION_INFO])
+
 ##
 # Checks for programs
 ##
@@ -636,6 +642,7 @@ AC_CONFIG_FILES( \
   src/common/libccan/Makefile \
   src/common/libzmqutil/Makefile \
   src/common/libtaskmap/Makefile \
+  src/common/libcount/Makefile \
   src/common/libfilemap/Makefile \
   src/common/libsdexec/Makefile \
   src/common/libmissing/Makefile \
@@ -666,6 +673,7 @@ AC_CONFIG_FILES( \
   etc/flux-idset.pc \
   etc/flux-schedutil.pc \
   etc/flux-hostlist.pc \
+  etc/flux-count.pc \
   etc/flux-taskmap.pc \
   etc/flux.service \
   etc/flux-housekeeping@.service \

@@ -11,6 +11,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/include \
 	-I$(top_builddir)/src/common/libflux \
 	-I$(top_srcdir)/src/common/libccan \
+	-I$(top_builddir)/src/common/libcount \
 	$(JANSSON_CFLAGS) \
 	$(FLUX_SECURITY_CFLAGS)
 
@@ -43,12 +44,9 @@ libjob_la_SOURCES = \
 	jjc.h \
 	unwrap.c \
 	unwrap.h \
-	count.c \
-	count.h \
 	idf58.h
 
 TESTS = \
-	test_count.t \
 	test_job.t \
 	test_sign_none.t \
 	test_unwrap.t \
@@ -90,8 +88,3 @@ test_unwrap_t_LDADD = $(test_ldadd)
 test_jobspec1_t_SOURCES = test/jobspec1.c
 test_jobspec1_t_CPPFLAGS = $(test_cppflags)
 test_jobspec1_t_LDADD = $(test_ldadd)
-
-test_count_t_SOURCES = test/count.c
-test_count_t_CPPFLAGS = $(test_cppflags)
-test_count_t_LDADD = $(test_ldadd) \
-	$(top_builddir)/src/common/libidset/libidset.la

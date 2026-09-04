@@ -15,11 +15,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <flux/count.h>
 #include <flux/optparse.h>
 
 #include "src/common/libutil/log.h"
 #include "src/common/libutil/read_all.h"
-#include "src/common/libjob/count.h"
 #include "src/common/libjob/jjc.h"
 
 int main (int ac, char *av[])

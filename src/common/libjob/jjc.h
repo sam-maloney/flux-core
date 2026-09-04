@@ -17,7 +17,7 @@
 
 #include <jansson.h>
 #include <stdbool.h>
-#include "count.h"
+#include <flux/count.h>
 
 #ifndef JJC_ERROR_TEXT_LENGTH
 #define JJC_ERROR_TEXT_LENGTH 256

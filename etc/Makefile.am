@@ -83,6 +83,7 @@ pkgconfig_DATA = flux-core.pc \
 	flux-idset.pc \
 	flux-schedutil.pc \
 	flux-hostlist.pc \
+	flux-count.pc \
 	flux-taskmap.pc
 endif
 
