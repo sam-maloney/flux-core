@@ -15,11 +15,11 @@
 #include <errno.h>
 #include <string.h>
 #include <jansson.h>
+#include <flux/count.h>
 
 #include "ccan/str/str.h"
 
 #include "jjc.h"
-#include "count.h"
 
 static int jjc_read_level (json_t *o, int level, struct jjc_counts *jj, int nodefactor);
 
