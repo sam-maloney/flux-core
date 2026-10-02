@@ -15,7 +15,7 @@
 #include <errno.h>
 #include <string.h>
 #include <jansson.h>
-#include <flux/count.h>
+#include <flux/resourcecount.h>
 
 #include "ccan/str/str.h"
 

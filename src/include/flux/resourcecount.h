@@ -8,7 +8,8 @@
  * SPDX-License-Identifier: LGPL-3.0
 \************************************************************/
 
-/* Allow in-tree programs to #include <flux/count.h> like out-of-tree would.
+/* Allow in-tree programs to #include <flux/resourcecount.h>
+ * like out-of-tree would.
  */
 
-#include "src/common/libcount/count.h"
+#include "src/common/libresourcecount/resourcecount.h"

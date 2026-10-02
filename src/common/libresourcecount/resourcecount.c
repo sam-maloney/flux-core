@@ -21,7 +21,7 @@
 #include <jansson.h>
 #include <flux/idset.h>
 
-#include "count.h"
+#include "resourcecount.h"
 
 void set_error (json_error_t *error, const char *fmt, ...)
 {

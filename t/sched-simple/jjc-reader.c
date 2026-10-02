@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
-#include <flux/count.h>
+#include <flux/resourcecount.h>
 #include <flux/optparse.h>
 
 #include "src/common/libutil/log.h"

@@ -13,15 +13,15 @@ AM_CPPFLAGS = \
 	-I$(top_builddir)/src/common/libflux \
 	$(JANSSON_CFLAGS)
 
-noinst_LTLIBRARIES = libcount.la
+noinst_LTLIBRARIES = libresourcecount.la
 
-fluxinclude_HEADERS = count.h
+fluxinclude_HEADERS = resourcecount.h
 
-libcount_la_SOURCES = \
-	count.c \
-	count.h
+libresourcecount_la_SOURCES = \
+	resourcecount.c \
+	resourcecount.h
 
-TESTS = test_count.t
+TESTS = test_resourcecount.t
 
 check_PROGRAMS = \
 	$(TESTS)
@@ -30,10 +30,10 @@ TEST_EXTENSIONS = .t
 T_LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) \
 	$(top_srcdir)/config/tap-driver.sh
 
-test_count_t_SOURCES = test/count.c
-test_count_t_CPPFLAGS = $(AM_CPPFLAGS)
-test_count_t_LDADD = \
-	$(top_builddir)/src/common/libcount/libcount.la \
+test_resourcecount_t_SOURCES = test/resourcecount.c
+test_resourcecount_t_CPPFLAGS = $(AM_CPPFLAGS)
+test_resourcecount_t_LDADD = \
+	$(top_builddir)/src/common/libresourcecount/libresourcecount.la \
 	$(top_builddir)/src/common/libidset/libidset.la \
 	$(top_builddir)/src/common/libtap/libtap.la \
 	$(JANSSON_LIBS)
