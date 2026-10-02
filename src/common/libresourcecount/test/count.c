@@ -15,7 +15,7 @@
 #include <stdbool.h>
 
 #include "src/common/libtap/tap.h"
-#include "src/common/libcount/count.h"
+#include "src/common/libresourcecount/count.h"
 #include "ccan/str/str.h"
 
 struct inout {

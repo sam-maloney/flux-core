@@ -3,9 +3,9 @@ exec_prefix=@exec_prefix@
 libdir=@libdir@
 includedir=@includedir@
 
-Name: flux-count
+Name: flux-resourcecount
 Description: Flux Resource Manager Jobspec Resource Count Library
 Version: @PACKAGE_VERSION@
 Requires: flux-idset
-Libs: -L${libdir} -lflux-count
+Libs: -L${libdir} -lflux-resourcecount
 Cflags: -I${includedir}

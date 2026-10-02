@@ -948,7 +948,7 @@ sched_simple_jjc_reader_SOURCES = sched-simple/jjc-reader.c
 sched_simple_jjc_reader_CPPFLAGS = $(test_cppflags)
 sched_simple_jjc_reader_LDADD = \
 	$(top_builddir)/src/common/libjob/libjob.la \
-	$(top_builddir)/src/common/libcount/libcount.la \
+	$(top_builddir)/src/common/libresourcecount/libresourcecount.la \
 	$(test_ldadd)
 sched_simple_jjc_reader_LDFLAGS = $(test_ldflags)
 

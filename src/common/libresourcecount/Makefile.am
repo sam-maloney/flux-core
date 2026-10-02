@@ -13,11 +13,11 @@ AM_CPPFLAGS = \
 	-I$(top_builddir)/src/common/libflux \
 	$(JANSSON_CFLAGS)
 
-noinst_LTLIBRARIES = libcount.la
+noinst_LTLIBRARIES = libresourcecount.la
 
 fluxinclude_HEADERS = count.h
 
-libcount_la_SOURCES = \
+libresourcecount_la_SOURCES = \
 	count.c \
 	count.h
 
@@ -33,7 +33,7 @@ T_LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) \
 test_count_t_SOURCES = test/count.c
 test_count_t_CPPFLAGS = $(AM_CPPFLAGS)
 test_count_t_LDADD = \
-	$(top_builddir)/src/common/libcount/libcount.la \
+	$(top_builddir)/src/common/libresourcecount/libresourcecount.la \
 	$(top_builddir)/src/common/libidset/libidset.la \
 	$(top_builddir)/src/common/libtap/libtap.la \
 	$(JANSSON_LIBS)

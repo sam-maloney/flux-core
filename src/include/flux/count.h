@@ -11,4 +11,4 @@
 /* Allow in-tree programs to #include <flux/count.h> like out-of-tree would.
  */
 
-#include "src/common/libcount/count.h"
+#include "src/common/libresourcecount/count.h"

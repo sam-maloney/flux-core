@@ -11,7 +11,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/include \
 	-I$(top_builddir)/src/common/libflux \
 	-I$(top_srcdir)/src/common/libccan \
-	-I$(top_builddir)/src/common/libcount \
+	-I$(top_builddir)/src/common/libresourcecount \
 	$(JANSSON_CFLAGS) \
 	$(FLUX_SECURITY_CFLAGS)
 
