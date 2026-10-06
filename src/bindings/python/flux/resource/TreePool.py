@@ -224,7 +224,7 @@ class TreeResourceRequest(ResourceRequest):
         sc = state["nslots"]
 
         if state["nnodes"] is not None:
-            node_count = state["nnodes"].scale(nf)
+            state["nnodes"].scale(nf)
             if state["slot_above_node"] and nf > 1 and sc.first % nf == 0:
                 # slot is an ancestor of node: the slot count was folded into
                 # the nodefactor, so divide it back out to recover the per-node
@@ -239,21 +239,20 @@ class TreeResourceRequest(ResourceRequest):
                 # than guess; nslots then reflects the literal jobspec counts.
                 slot_count = sc
         else:
-            node_count = None
             slot_count = sc
 
         exclusive = state["exclusive"]
         container_level = state["container_level"]
         # Exclusive slot-only fold: each slot gets one exclusive node.
         # Skip for container-exclusive: slots pack across nodes by container.
-        if exclusive and node_count is None and container_level is None:
-            node_count = slot_count
+        if exclusive and state["nnodes"] is None and container_level is None:
+            state["nnodes"] = slot_count
             slot_count = ResourceCount(1)
         attrs = system or {}
         duration = attrs.get("duration") or 0.0
         constraint = attrs.get("constraints") or None
         return cls(
-            node_count,
+            state["nnodes"],
             slot_count,
             state["slot_size"] if state["slot_size"] is not None else 0,
             state["gpu_per_slot"],
