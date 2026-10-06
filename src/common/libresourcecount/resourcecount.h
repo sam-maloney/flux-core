@@ -39,6 +39,7 @@ struct count {
     char operator;
     bool isrange;
     struct idset *idset;
+    unsigned int last_value;
 };
 
 /* Create a count from a json object.
@@ -73,6 +74,14 @@ unsigned int count_first (const struct count *count);
  * be called using values produced by prior calls to count_first or count_next.
  */
 unsigned int count_next (const struct count *count, unsigned int value);
+
+/* Returns the last value in the count.
+ * Returns COUNT_INVALID_VALUE if the count is NULL.
+ * Returns COUNT_MAX for an unbounded range.
+ * count->last_value is computed on first call and stored.
+ * N.B. if isrange, this is not necessarily equal to the value stored in max,
+ */
+unsigned int count_last (struct count *count);
 
 
 #endif /* !FLUX_COUNT_H */

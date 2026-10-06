@@ -341,6 +341,36 @@ unsigned int count_next (const struct count *count, unsigned int value)
     return next > value ? next : COUNT_INVALID_VALUE;
 }
 
+unsigned int count_last (struct count *count)
+{
+    unsigned int last = COUNT_INVALID_VALUE;
+
+    if (count) {
+        if (count->last_value) {
+            last = count->last_value;
+        } else if (count->integer) {
+            count->last_value = count->integer;
+            last = count->last_value;
+        } else if (count->isrange) {
+            if (count->max == COUNT_MAX
+                || (count->operator == '+' && count->operand == 1)) {
+                count->last_value = count->max;
+            } else {
+                last = count->min;
+                while (last != COUNT_INVALID_VALUE) {
+                    count->last_value = last;
+                    last = count_next (count, last);
+                }
+            }
+            last = count->last_value;
+        } else if (count->idset) {
+            count->last_value = idset_last (count->idset);
+            last = count->last_value;
+        }
+    }
+    return last;
+}
+
 /*
  * vi:tabstop=4 shiftwidth=4 expandtab
  */
