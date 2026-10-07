@@ -337,7 +337,8 @@ unsigned int count_next (const struct count *count, unsigned int value)
             next = idset_next (count->idset, value);
         }
     }
-    return next;
+    // check for overflow
+    return next > value ? next : COUNT_INVALID_VALUE;
 }
 
 /*
