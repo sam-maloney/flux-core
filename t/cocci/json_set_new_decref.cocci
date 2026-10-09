@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-3.0
+// SPDX-License-Identifier: LGPL-3.0-only
 //
 // Detect double-free of json_t value after json_*_new() failure.
 //

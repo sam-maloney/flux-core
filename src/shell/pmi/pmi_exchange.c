@@ -5,7 +5,7 @@
  * This file is part of the Flux resource manager framework.
  * For details, see https://github.com/flux-framework.
  *
- * SPDX-License-Identifier: LGPL-3.0
+ * SPDX-License-Identifier: LGPL-3.0-only
 \************************************************************/
 
 /* pmi_exchange.c - sync local dict across shells

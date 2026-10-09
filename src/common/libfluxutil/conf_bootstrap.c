@@ -5,7 +5,7 @@
  * This file is part of the Flux resource manager framework.
  * For details, see https://github.com/flux-framework.
  *
- * SPDX-License-Identifier: LGPL-3.0
+ * SPDX-License-Identifier: LGPL-3.0-only
 \************************************************************/
 
 /* conf_bootstrap.c - parse and validate [bootstrap] table
