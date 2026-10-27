@@ -83,21 +83,16 @@ class TestResourceCountMethods(unittest.TestCase):
     def test_iterator_unbounded(self):
         self.assertEqual(list(islice(rc.ResourceCount("2+"), 3)), [2, 3, 4])
 
-    def test_first_next(self):
+    def test_next(self):
         c = rc.ResourceCount("2-4")
-        self.assertEqual(c.first, 2)
-        self.assertEqual(c.next(2), 3)
-        self.assertEqual(c.next(3), 4)
-        self.assertEqual(c.next(4), rc.RESOURCECOUNT_INVALID_VALUE)
-        #  a simple integer has no next value
-        self.assertEqual(rc.ResourceCount(4).next(4), rc.RESOURCECOUNT_INVALID_VALUE)
-
-    def test_next_invalid(self):
-        c = rc.ResourceCount("2-4")
-        with self.assertRaises(TypeError):
-            c.next("2")
-        with self.assertRaises(ValueError):
-            c.next(-1)
+        self.assertEqual(c.next(), 2)
+        self.assertEqual(c.next(), 3)
+        self.assertEqual(c.next(), 4)
+        self.assertEqual(c.next(), rc.RESOURCECOUNT_INVALID_VALUE)
+        # a simple integer has only a single, initial, next value
+        c2 = rc.ResourceCount(4)
+        self.assertEqual(c2.next(), 4)
+        self.assertEqual(c2.next(), rc.RESOURCECOUNT_INVALID_VALUE)
 
     def test_set_flags(self):
         c = rc.ResourceCount("1-3")

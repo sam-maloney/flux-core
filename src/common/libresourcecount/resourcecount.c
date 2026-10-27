@@ -28,6 +28,7 @@ struct resourcecount {
     unsigned int min;
     unsigned int max;
     unsigned int operand;
+    unsigned int value;
     char operator;
     bool isrange;
     bool isunbounded;
@@ -348,32 +349,40 @@ unsigned int resourcecount_first (const struct resourcecount *count)
     return first;
 }
 
-unsigned int resourcecount_next (const struct resourcecount *count, unsigned int value)
+unsigned int range_next (const struct resourcecount *count, unsigned int value)
+{
+    unsigned int next = RESOURCECOUNT_INVALID_VALUE;
+
+    if (count->operator == '+' && count->max - value >= count->operand) {
+        next = value + count->operand;
+    } else if (count->operator == '*' && count->max / count->operand >= value) {
+        next = value * count->operand;
+    } else if (count->operator == '^') {
+        next = value;
+        for (unsigned int i = 1; i < count->operand; ++i) {
+            if (next > count->max / value) {
+                next = RESOURCECOUNT_INVALID_VALUE;
+                break;
+            }
+            next *= value;
+        }
+    }
+    return next;
+}
+
+unsigned int resourcecount_next (struct resourcecount *count)
 {
     unsigned int next = RESOURCECOUNT_INVALID_VALUE;
 
     if (count) {
-        if (count->isrange) {
-            if (count->operator == '+') {
-                if (count->max > value && count->max - value >= count->operand) {
-                    next = value + count->operand;
-                }
-            } else if (count->operator == '*') {
-                next = count->max / count->operand < value ? RESOURCECOUNT_INVALID_VALUE
-                                                           : value * count->operand;
-            } else if (count->operator == '^') {
-                next = value;
-                for (unsigned int i = 1; i < count->operand; ++i) {
-                    if (next > count->max / value) {
-                        next = RESOURCECOUNT_INVALID_VALUE;
-                        break;
-                    }
-                    next *= value;
-                }
-            }
+        if (count->value == 0 || count->value == RESOURCECOUNT_INVALID_VALUE) {
+            next = resourcecount_first (count);
+        } else if (count->isrange) {
+            next = range_next (count, count->value);
         } else if (count->idset) {
-            next = idset_next (count->idset, value);
+            next = idset_next (count->idset, count->value);
         }
+        count->value = next;
     }
     return next;
 }
@@ -393,7 +402,7 @@ unsigned int resourcecount_last (const struct resourcecount *count)
                 unsigned int tmp = count->min;
                 while (tmp != RESOURCECOUNT_INVALID_VALUE) {
                     last = tmp;
-                    tmp = resourcecount_next (count, tmp);
+                    tmp = range_next (count, tmp);
                 }
             }
         } else if (count->idset) {

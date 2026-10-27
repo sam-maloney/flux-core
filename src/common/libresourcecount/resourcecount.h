@@ -57,14 +57,13 @@ char *resourcecount_encode (const struct resourcecount *count, int flags);
  */
 unsigned int resourcecount_first (const struct resourcecount *count);
 
-/* Return the next value in the resourcecount.
- * Returns RESOURCECOUNT_INVALID_VALUE if 'value' is the last valid value,
- * or if count is NULL or a simple integer (as there is no "next" value).
- * N.B. if count->isrange, this does not check if 'value' is a valid value;
- * it should only be called using valid values produced by prior calls to
- * resourcecount_first or resourcecount_next.
+/* Return the next value in the resourcecount, and stores it to count->value.
+ * Returns RESOURCECOUNT_INVALID_VALUE if there are no more valid values,
+ * or if count is NULL.
+ * Returns resourcecount_first (count) on first call or if previous call
+ * returned RESOURCECOUNT_INVALID_VALUE.
  */
-unsigned int resourcecount_next (const struct resourcecount *count, unsigned int value);
+unsigned int resourcecount_next (struct resourcecount *count);
 
 /* Return the largest valid value in the count.
  * Returns RESOURCECOUNT_INVALID_VALUE if the count is NULL.

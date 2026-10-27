@@ -307,10 +307,10 @@ void test_iteration (void)
                 diag ("error '%s'", error.text);
             if (count != NULL) {
                 int i = 0;
-                int value = resourcecount_first (count);
+                int value = resourcecount_next (count);
                 while (value != RESOURCECOUNT_INVALID_VALUE) {
                     i += sprintf (s+i, "%u,", value);
-                    value = resourcecount_next (count, value);
+                    value = resourcecount_next (count);
                 }
                 s[i-1] = '\0';
                 bool match = streq (s, ip->out);
@@ -329,8 +329,8 @@ void test_iteration (void)
         "resourcecount_create (NULL, NULL) == NULL works");
     ok (resourcecount_first (NULL) == RESOURCECOUNT_INVALID_VALUE,
         "resourcecount_first (NULL) == RESOURCECOUNT_INVALID_VALUE works");
-    ok (resourcecount_next (NULL, 2) == RESOURCECOUNT_INVALID_VALUE,
-        "resourcecount_next (NULL, ...) == RESOURCECOUNT_INVALID_VALUE works");
+    ok (resourcecount_next (NULL) == RESOURCECOUNT_INVALID_VALUE,
+        "resourcecount_next (NULL) == RESOURCECOUNT_INVALID_VALUE works");
 }
 
 struct inout_uint test_last_inputs[] = {
@@ -426,7 +426,8 @@ void test_overflow (void)
 
         errno = 0;
         count = resourcecount_decode (overflow_inputs[i]);
-        unsigned int result = resourcecount_next (count, resourcecount_first (count));
+        resourcecount_next (count); // initialize count->value
+        unsigned int result = resourcecount_next (count);
         bool match = result == RESOURCECOUNT_INVALID_VALUE;
         ok (count && match,
             "resourcecount_next catches overflow in '%s'",

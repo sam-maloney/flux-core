@@ -23,7 +23,7 @@ RESOURCECOUNT_FLAG_BRACKETS = lib.RESOURCECOUNT_FLAG_BRACKETS
 class ResourceCountIterator:
     def __init__(self, count):
         self._count = count
-        self._next = count.first
+        self._next = count.next()
 
     def __iter__(self):
         return self
@@ -32,7 +32,7 @@ class ResourceCountIterator:
         if self._next == RESOURCECOUNT_INVALID_VALUE * self._count.scale_factor:
             raise StopIteration
         result = self._next
-        self._next = self._count.next(result)
+        self._next = self._count.next()
         return result
 
 
@@ -152,13 +152,6 @@ class ResourceCount(WrapperPimpl):
         text = self.encode(flags=RESOURCECOUNT_FLAG_SHORT)
         return "," in text or ":" in text
 
-    @staticmethod
-    def _check_integer(i, name):
-        if not isinstance(i, numbers.Integral):
-            raise TypeError(f"ResourceCount.{name} supports integers, not {type(i)}")
-        if i < 0:
-            raise ValueError(f"negative integer passed to ResourceCount.{name}")
-
     @property
     def first(self):
         """Return the first (minimum) valid value that the count may take"""
@@ -171,14 +164,16 @@ class ResourceCount(WrapperPimpl):
         """
         return None if self.is_unbounded else self.pimpl.last() * self.scale_factor
 
-    def next(self, i):
-        """Return the next value that the count may take after value i"""
-        self._check_integer(i, "next")
-        return self.pimpl.next(i // self.scale_factor) * self.scale_factor
+    def next(self):
+        """Return the next value that the count may take"""
+        return self.pimpl.next() * self.scale_factor
 
     def scale(self, factor):
         """Scale the values of the count by an integer factor"""
-        self._check_integer(factor, "next")
+        if not isinstance(factor, numbers.Integral):
+            raise TypeError(f"ResourceCount.scale supports integers, not {type(factor)}")
+        if factor < 0:
+            raise ValueError("negative integer passed to ResourceCount.scale")
         self.scale_factor = factor
         return self
 
