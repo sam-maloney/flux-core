@@ -5,7 +5,7 @@
  * This file is part of the Flux resource manager framework.
  * For details, see https://github.com/flux-framework.
  *
- * SPDX-License-Identifier: LGPL-3.0
+ * SPDX-License-Identifier: LGPL-3.0-only
 \************************************************************/
 
 /* commit_order.c - ensure watch responses are returned in commit order */

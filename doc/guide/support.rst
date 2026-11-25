@@ -5,10 +5,10 @@ License
 -------
 
 .. figure:: images/lgplv3-147x51.png
-   :alt: LGPL-3.0 logo
+   :alt: LGPL-3.0-only logo
    :align: right
 
-Flux-core is licensed under `LGPL-3.0
+Flux-core is licensed under `LGPL-3.0-only
 <https://www.gnu.org/licenses/lgpl-3.0.en.html>`_ which means project forks
 must retain the same license and follow the license's requirements for making
 source code available to end users.

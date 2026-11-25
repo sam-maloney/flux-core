@@ -6,7 +6,7 @@
  * For details, see https://github.com/flux-framework.
  * For details, see https://github.com/flux-framework.
  *
- * SPDX-License-Identifier: LGPL-3.0
+ * SPDX-License-Identifier: LGPL-3.0-only
 \************************************************************/
 
 #if HAVE_CONFIG_H

@@ -5,7 +5,7 @@
 # This file is part of the Flux resource manager framework.
 # For details, see https://github.com/flux-framework.
 #
-# SPDX-License-Identifier: LGPL-3.0
+# SPDX-License-Identifier: LGPL-3.0-only
 ###############################################################
 
 # Configuration file for the Sphinx documentation builder.
@@ -36,7 +36,7 @@ project = 'flux-core'
 # REUSE-IgnoreStart
 copyright = '''Copyright 2014 Lawrence Livermore National Security, LLC and Flux developers.
 
-SPDX-License-Identifier: LGPL-3.0'''
+SPDX-License-Identifier: LGPL-3.0-only'''
 # REUSE-IgnoreEnd
 
 # -- General configuration ---------------------------------------------------

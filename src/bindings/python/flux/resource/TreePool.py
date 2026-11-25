@@ -5,7 +5,7 @@
 # This file is part of the Flux resource manager framework.
 # For details, see https://github.com/flux-framework.
 #
-# SPDX-License-Identifier: LGPL-3.0
+# SPDX-License-Identifier: LGPL-3.0-only
 ###############################################################
 
 """TreePool: Rv1Pool extension for sub-node affinity-aware GPU+core allocation.

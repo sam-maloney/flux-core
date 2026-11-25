@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-3.0
+// SPDX-License-Identifier: LGPL-3.0-only
 //
 // Forbid mixing 'o' and 'O' specifiers in a single jansson pack format.
 //

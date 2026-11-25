@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-3.0
+// SPDX-License-Identifier: LGPL-3.0-only
 //
 // Detect double-free of a json_t value stolen by a bare 'o' pack specifier.
 //

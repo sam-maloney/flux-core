@@ -65,7 +65,7 @@ authoritative references for these interfaces.
 Licensing and development practices
 ===================================
 
-Flux-core is free software licensed under LGPL-3.0, and the wider framework is
+Flux-core is free software licensed under LGPL-3.0-only, and the wider framework is
 developed in the open on `GitHub <https://github.com/flux-framework>`_ under
 the Collective Code Construction Contract described in :doc:`RFC 1
 <rfc:spec_1>`.  Vendors are encouraged to follow the same model for their

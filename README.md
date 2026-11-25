@@ -68,6 +68,6 @@ please refer to our [documentation](https://flux-framework.readthedocs.io/projec
 
 #### Release
 
-SPDX-License-Identifier: LGPL-3.0
+SPDX-License-Identifier: LGPL-3.0-only
 
 LLNL-CODE-764420

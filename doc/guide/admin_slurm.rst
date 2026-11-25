@@ -105,7 +105,7 @@ Flux doesn't need a step manager
 Flux APIs are not an afterthought
   Well thought out Python and C APIs make it easy to integrate Flux with
   workflow systems and new environments.  Flux APIs are licensed under the
-  non-viral LGPL-3.0.  Experimental bindings for Go and Julia are also
+  non-viral LGPL-3.0-only.  Experimental bindings for Go and Julia are also
   available.
 
 Flux has a rich resource representation
